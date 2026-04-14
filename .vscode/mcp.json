@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "mcp-test-server": {
+      "url": "http://localhost:3000/mcp"
+    },
+    "bitfabrik-mcp": {
+      "url": "https://bitfabrik.io/mcp"
+    }
+  }
+}
