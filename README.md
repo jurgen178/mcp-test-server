@@ -17,6 +17,32 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 - `getGitHubRepoStats`: fetches star and fork counts for a GitHub repository
 - `getHilbertHotelInfo`: returns generated structured sample data
 
+## Tool Screenshots
+
+### addNumbers
+
+![addNumbers screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/addnumbers.png?raw=true)
+
+### reverse
+
+![reverse screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/reverse.png?raw=true)
+
+### formatText
+
+![formatText screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/formattext.png?raw=true)
+
+### pixelBadge
+
+![pixelBadge screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/pixelbadge.png?raw=true)
+
+### getGitHubRepoStats
+
+![getGitHubRepoStats screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/github.png?raw=true)
+
+### getHilbertHotelInfo
+
+![getHilbertHotelInfo screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/hilbert.png?raw=true)
+
 ## Requirements
 
 - Node.js 18 or newer
@@ -95,6 +121,13 @@ If you are connecting from an MCP client, configure it to use the Streamable HTT
 
 ```text
 .
+├── doc/
+│   ├── addnumbers.png
+│   ├── formattext.png
+│   ├── github.png
+│   ├── hilbert.png
+│   ├── pixelbadge.png
+│   └── reverse.png
 ├── src/
 │   └── server.ts
 ├── package.json
