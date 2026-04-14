@@ -138,5 +138,4 @@ If you are connecting from an MCP client, configure it to use the Streamable HTT
 ## Notes
 
 - CORS is enabled for any origin
-- The MCP server name is `test-server`
-- The package name is `mcp-test-server`
+- The MCP server name is `mcp-test-server`

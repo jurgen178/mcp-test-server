@@ -9,7 +9,7 @@ const MCP_PORT = Number(process.env.PORT) || 3000;
 // Create a MCP server
 const getServer = () => {
   const server = new McpServer({
-    name: 'test-server',
+    name: 'mcp-test-server',
     version: '1.0.0'
   });
 
