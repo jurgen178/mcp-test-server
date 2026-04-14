@@ -66,6 +66,9 @@ The server listens on:
 http://localhost:3000/mcp
 ```
 
+![Console output screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/cmd.png?raw=true)
+
+
 Additional deployment:
 
 ```text
@@ -123,6 +126,7 @@ If you are connecting from an MCP client, configure it to use the Streamable HTT
 .
 ├── doc/
 │   ├── addnumbers.png
+│   ├── cmd.png
 │   ├── formattext.png
 │   ├── github.png
 │   ├── hilbert.png
