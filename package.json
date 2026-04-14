@@ -1,5 +1,5 @@
 {
-  "name": "mcp-diagnostic-server",
+  "name": "mcp-test-server",
   "version": "1.0.0",
   "scripts": {
     "start": "npx ts-node src/server.ts",

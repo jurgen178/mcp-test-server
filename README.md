@@ -1,4 +1,4 @@
-# MCP Diagnostic Server
+# MCP Test Server
 
 Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools for testing clients and transports.
 
@@ -139,4 +139,4 @@ If you are connecting from an MCP client, configure it to use the Streamable HTT
 
 - CORS is enabled for any origin
 - The MCP server name is `test-server`
-- The package name is `mcp-diagnostic-server`
+- The package name is `mcp-test-server`
