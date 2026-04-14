@@ -7,6 +7,7 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 - Exposes an MCP endpoint at `POST /mcp`
 - Starts an Express server on port `3000` by default
 - Registers a small set of demo tools for math, text formatting, images, and GitHub API lookups
+- Exposes demo resource and demo prompt in addition to the tools
 
 ## Included Tools
 
@@ -16,6 +17,15 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 - `pixelBadge`: returns a small SVG badge as image content
 - `getGitHubRepoStats`: fetches star and fork counts for a GitHub repository
 - `getHilbertHotelInfo`: returns generated structured sample data
+
+## Included Resources
+
+- `resorcerer`: returns a compact markdown overview of the server capabilities
+
+## Included Prompts
+
+- `promptsmith`: creates a reusable prompt brief from `goal`, `audience`, and `tone`
+- `ticket-summary`: creates a structured summary for a support ticket
 
 ## Tool Screenshots
 

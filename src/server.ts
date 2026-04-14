@@ -1,7 +1,8 @@
 import express, { Request, Response } from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolResult, GetPromptResult, isInitializeRequest, PrimitiveSchemaDefinition, ReadResourceResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolResult, GetPromptResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const MCP_PORT = Number(process.env.PORT) || 3000;
@@ -217,6 +218,150 @@ const getServer = () => {
           },
         ],
         structuredContent,
+      };
+    }
+  );
+
+  const RESORCERER_URI = 'resource://mcp-test-server/resorcerer';
+
+  server.registerResource(
+    'resorcerer',
+    RESORCERER_URI,
+    {
+      title: 'Resorcerer',
+      description: 'Provides a compact overview of the demo server capabilities',
+      mimeType: 'text/markdown',
+    },
+    async (): Promise<ReadResourceResult> => {
+      const resourceText = [
+        '# Resorcerer',
+        '',
+        'This resource describes the MCP demo server surface in one place.',
+        '',
+        '## Tools',
+        '- addNumbers',
+        '- reverse',
+        '- formatText',
+        '- pixelBadge',
+        '- getGitHubRepoStats',
+        '- getHilbertHotelInfo',
+        '',
+        '## Resource',
+        '- resorcerer',
+        '',
+        '## Prompt',
+        '- promptsmith',
+        '- ticket-summary',
+        '',
+        `Generated at: ${new Date().toISOString()}`,
+      ].join('\n');
+
+      return {
+        contents: [
+          {
+            uri: RESORCERER_URI,
+            mimeType: 'text/markdown',
+            text: resourceText,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    'promptsmith',
+    {
+      title: 'Promptsmith',
+      description: 'Builds a reusable prompt brief for a task, audience, and tone',
+      argsSchema: {
+        goal: z.string().describe('The task or outcome the prompt should achieve'),
+        audience: z.string().optional().describe('Who the resulting prompt is meant for'),
+        tone: completable(
+          z.enum(['clear', 'friendly', 'formal', 'concise']).default('clear').describe('Desired tone of the prompt'),
+          async (value) => {
+            const tones = ['clear', 'friendly', 'formal', 'concise'] as const;
+            const prefix = value?.toLowerCase() ?? '';
+
+            return tones.filter((tone) => tone.startsWith(prefix));
+          }
+        ),
+      },
+    },
+    async ({ goal, audience, tone }): Promise<GetPromptResult> => {
+      const selectedAudience = audience ?? 'a technically literate user';
+      const selectedTone = tone;
+
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: [
+                'Create a reusable prompt with the following requirements.',
+                `Goal: ${goal}`,
+                `Audience: ${selectedAudience}`,
+                `Tone: ${selectedTone}`,
+                'Return the result with three sections: system prompt, user prompt template, and variables.',
+                'Keep the wording specific, concise, and ready to reuse.',
+              ].join('\n'),
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerPrompt(
+    'ticket-summary',
+    {
+      title: 'Ticket Summary',
+      description: 'Creates a concise summary for a support ticket',
+      argsSchema: {
+        ticketText: z.string().describe('Original support ticket text'),
+        audience: completable(
+          z.enum(['developer', 'support', 'customer']).describe('Target audience'),
+          async (value) => {
+            const audiences = ['developer', 'support', 'customer'] as const;
+            const prefix = value?.toLowerCase() ?? '';
+
+            return audiences.filter((audience) => audience.startsWith(prefix));
+          }
+        ),
+        style: completable(
+          z.enum(['short', 'detailed']).default('short').describe('Summary style'),
+          async (value) => {
+            const styles = ['short', 'detailed'] as const;
+            const prefix = value?.toLowerCase() ?? '';
+
+            return styles.filter((style) => style.startsWith(prefix));
+          }
+        ),
+      },
+    },
+    async ({ ticketText, audience, style }): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: [
+                'Summarize the following support ticket.',
+                `Audience: ${audience}`,
+                `Style: ${style}`,
+                '',
+                'Ticket:',
+                ticketText,
+                '',
+                'Return:',
+                '- short summary',
+                '- main problem',
+                '- next action',
+              ].join('\n'),
+            },
+          },
+        ],
       };
     }
   );
