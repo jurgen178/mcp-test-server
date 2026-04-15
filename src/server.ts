@@ -1,17 +1,152 @@
+import { randomUUID } from 'crypto';
 import express, { Request, Response } from 'express';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, RegisteredPrompt, RegisteredResource, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolResult, GetPromptResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolResult, GetPromptResult, ReadResourceResult, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const MCP_PORT = Number(process.env.PORT) || 3000;
+const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
+const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
+
+type SessionContext = {
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+  dynamicResource: RegisteredResource;
+  dynamicPrompt: RegisteredPrompt;
+  dynamicTool: RegisteredTool;
+  eventTimer?: NodeJS.Timeout;
+};
+
+const sessions = new Map<string, SessionContext>();
+
+const liveState = {
+  version: 0,
+  message: 'Server started',
+  source: 'bootstrap',
+  updatedAt: new Date().toISOString(),
+};
+
+const getHeaderValue = (value: string | string[] | undefined): string | undefined => {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+
+  return value;
+};
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const updateLiveState = (message: string, source: string) => {
+  liveState.version += 1;
+  liveState.message = message;
+  liveState.source = source;
+  liveState.updatedAt = new Date().toISOString();
+};
+
+const stopEventTimer = (context: SessionContext) => {
+  if (context.eventTimer) {
+    clearInterval(context.eventTimer);
+    context.eventTimer = undefined;
+  }
+};
+
+const setEnabledState = (
+  registeredItem: RegisteredResource | RegisteredPrompt | RegisteredTool,
+  enabled: boolean
+) => {
+  if (enabled) {
+    registeredItem.enable();
+    return 'enabled';
+  }
+
+  registeredItem.disable();
+  return 'disabled';
+};
+
+const emitLiveUpdate = async (message: string, source: string, sessionIds?: string[]) => {
+  updateLiveState(message, source);
+
+  const targetSessionIds = sessionIds ?? Array.from(sessions.keys());
+
+  await Promise.all(targetSessionIds.map(async (sessionId) => {
+    const context = sessions.get(sessionId);
+
+    if (!context || !context.server.isConnected()) {
+      return;
+    }
+
+    try {
+      await context.server.sendLoggingMessage(
+        {
+          level: 'info',
+          logger: 'mcp-test-server',
+          data: {
+            event: 'live-update',
+            message,
+            source,
+            version: liveState.version,
+            updatedAt: liveState.updatedAt,
+          },
+        },
+        sessionId
+      );
+
+      await context.server.server.sendResourceUpdated({
+        uri: LIVE_RESOURCE_URI,
+      });
+    } catch (error) {
+      console.error(`Failed to send live update for session ${sessionId}:`, error);
+    }
+  }));
+};
+
+const startEventBurst = (sessionId: string, ticks: number, delayMs: number) => {
+  const context = sessions.get(sessionId);
+
+  if (!context) {
+    return false;
+  }
+
+  stopEventTimer(context);
+
+  let currentTick = 0;
+
+  context.eventTimer = setInterval(() => {
+    const activeContext = sessions.get(sessionId);
+
+    if (!activeContext) {
+      return;
+    }
+
+    currentTick += 1;
+    void emitLiveUpdate(
+      `Event burst tick ${currentTick}/${ticks}`,
+      'event-burst',
+      [sessionId]
+    );
+
+    if (currentTick >= ticks) {
+      stopEventTimer(activeContext);
+    }
+  }, delayMs);
+
+  return true;
+};
 
 // Create a MCP server
 const getServer = () => {
   const server = new McpServer({
     name: 'mcp-test-server',
     version: '1.0.0'
+  }, {
+    capabilities: {
+      logging: {},
+      resources: {
+        subscribe: true,
+      },
+    },
   });
 
   // Register a tool that adds two numbers
@@ -222,7 +357,252 @@ const getServer = () => {
     }
   );
 
+  server.registerTool(
+    'runProgressDemo',
+    {
+      title: 'Run Progress Demo',
+      description: 'Counts through several steps and emits notifications/progress updates when requested by the client',
+      inputSchema: {
+        steps: z.number().int().min(1).max(20).default(5).describe('How many progress steps to emit'),
+        delayMs: z.number().int().min(50).max(2000).default(250).describe('Delay between progress notifications in milliseconds'),
+      },
+    },
+    async ({ steps, delayMs }, extra): Promise<CallToolResult> => {
+      for (let index = 1; index <= steps; index += 1) {
+        if (extra.signal.aborted) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Progress demo cancelled at step ${index}.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (extra._meta?.progressToken !== undefined) {
+          await extra.sendNotification({
+            method: 'notifications/progress',
+            params: {
+              progressToken: extra._meta.progressToken,
+              progress: index,
+              total: steps,
+              message: `Progress step ${index}/${steps}`,
+            },
+          });
+        }
+
+        await sleep(delayMs);
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Progress demo finished with ${steps} steps and ${delayMs}ms delay.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'pushLiveUpdate',
+    {
+      title: 'Push Live Update',
+      description: 'Updates the live demo resource and emits notifications/resources/updated plus a logging message',
+      inputSchema: {
+        message: z.string().min(1).max(200).describe('Message written into the live resource'),
+        broadcast: z.boolean().default(false).describe('True to send the update to all sessions, false for the current session only'),
+      },
+    },
+    async ({ message, broadcast }, extra): Promise<CallToolResult> => {
+      const targetSessionIds = broadcast || !extra.sessionId ? undefined : [extra.sessionId];
+      await emitLiveUpdate(message, 'pushLiveUpdate', targetSessionIds);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: broadcast
+              ? `Live update broadcast to ${sessions.size} session(s).`
+              : `Live update sent for session ${extra.sessionId ?? 'n/a'}.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'startEventBurst',
+    {
+      title: 'Start Event Burst',
+      description: 'Starts a short timer that emits live resource update notifications after the tool has already returned',
+      inputSchema: {
+        ticks: z.number().int().min(1).max(20).default(5).describe('Number of timed notifications to emit'),
+        delayMs: z.number().int().min(100).max(5000).default(1000).describe('Delay between emitted events in milliseconds'),
+      },
+    },
+    async ({ ticks, delayMs }, extra): Promise<CallToolResult> => {
+      if (!extra.sessionId) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No session ID is bound to this request. Initialize a stateful session first.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const started = startEventBurst(extra.sessionId, ticks, delayMs);
+
+      if (!started) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session ${extra.sessionId} is no longer active.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Event burst started for session ${extra.sessionId}. Keep the GET /mcp SSE stream open to receive ${ticks} events.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'toggleDynamicCatalog',
+    {
+      title: 'Toggle Dynamic Catalog',
+      description: 'Enables or disables demo resource, prompt, and tool entries so clients can observe list_changed notifications',
+      inputSchema: {
+        resource: z.boolean().optional().describe('Enable or disable the dynamic demo resource'),
+        prompt: z.boolean().optional().describe('Enable or disable the dynamic demo prompt'),
+        tool: z.boolean().optional().describe('Enable or disable the dynamic demo tool'),
+      },
+    },
+    async ({ resource, prompt, tool }, extra): Promise<CallToolResult> => {
+      if (!extra.sessionId) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No session ID is bound to this request. Initialize a stateful session first.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const context = sessions.get(extra.sessionId);
+
+      if (!context) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Session ${extra.sessionId} is no longer active.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const changes: string[] = [];
+
+      if (typeof resource === 'boolean') {
+        changes.push(`resource=${setEnabledState(context.dynamicResource, resource)}`);
+      }
+
+      if (typeof prompt === 'boolean') {
+        changes.push(`prompt=${setEnabledState(context.dynamicPrompt, prompt)}`);
+      }
+
+      if (typeof tool === 'boolean') {
+        changes.push(`tool=${setEnabledState(context.dynamicTool, tool)}`);
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: changes.length > 0
+              ? `Dynamic catalog updated for session ${extra.sessionId}: ${changes.join(', ')}`
+              : 'No catalog flags changed. Provide at least one of resource, prompt, or tool.',
+          },
+        ],
+      };
+    }
+  );
+
   const RESORCERER_URI = 'resource://mcp-test-server/resorcerer';
+  const dynamicResource = server.registerResource(
+    'dynamic-note',
+    DYNAMIC_RESOURCE_URI,
+    {
+      title: 'Dynamic Note',
+      description: 'Only visible when enabled via toggleDynamicCatalog',
+      mimeType: 'text/markdown',
+    },
+    async (): Promise<ReadResourceResult> => {
+      const resourceText = [
+        '# Dynamic Note',
+        '',
+        'This resource exists to test notifications/resources/list_changed.',
+        '',
+        `Version: ${liveState.version}`,
+        `Updated At: ${liveState.updatedAt}`,
+      ].join('\n');
+
+      return {
+        contents: [
+          {
+            uri: DYNAMIC_RESOURCE_URI,
+            mimeType: 'text/markdown',
+            text: resourceText,
+          },
+        ],
+      };
+    }
+  );
+
+  dynamicResource.disable();
+
+  server.registerResource(
+    'live-status',
+    LIVE_RESOURCE_URI,
+    {
+      title: 'Live Status',
+      description: 'Live-updating demo resource for notifications/resources/updated tests',
+      mimeType: 'application/json',
+    },
+    async (): Promise<ReadResourceResult> => {
+      return {
+        contents: [
+          {
+            uri: LIVE_RESOURCE_URI,
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              ...liveState,
+              activeSessions: sessions.size,
+            }, null, 2),
+          },
+        ],
+      };
+    }
+  );
 
   server.registerResource(
     'resorcerer',
@@ -245,13 +625,21 @@ const getServer = () => {
         '- pixelBadge',
         '- getGitHubRepoStats',
         '- getHilbertHotelInfo',
+        '- runProgressDemo',
+        '- pushLiveUpdate',
+        '- startEventBurst',
+        '- toggleDynamicCatalog',
+        '- dynamicEcho (optional)',
         '',
-        '## Resource',
+        '## Resources',
         '- resorcerer',
+        '- live-status',
+        '- dynamic-note (optional)',
         '',
-        '## Prompt',
+        '## Prompts',
         '- promptsmith',
         '- ticket-summary',
+        '- dynamic-event-brief (optional)',
         '',
         `Generated at: ${new Date().toISOString()}`,
       ].join('\n');
@@ -267,6 +655,36 @@ const getServer = () => {
       };
     }
   );
+
+  const dynamicPrompt = server.registerPrompt(
+    'dynamic-event-brief',
+    {
+      title: 'Dynamic Event Brief',
+      description: 'Only visible when enabled via toggleDynamicCatalog',
+      argsSchema: {
+        topic: z.string().describe('Topic for the dynamic prompt'),
+      },
+    },
+    async ({ topic }): Promise<GetPromptResult> => {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: [
+                'Create a short event brief.',
+                `Topic: ${topic}`,
+                `Current live version: ${liveState.version}`,
+              ].join('\n'),
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  dynamicPrompt.disable();
 
   server.registerPrompt(
     'promptsmith',
@@ -366,7 +784,35 @@ const getServer = () => {
     }
   );
 
-  return server;
+  const dynamicTool = server.registerTool(
+    'dynamicEcho',
+    {
+      title: 'Dynamic Echo',
+      description: 'Only visible when enabled via toggleDynamicCatalog',
+      inputSchema: {
+        text: z.string().describe('Text to echo back'),
+      },
+    },
+    async ({ text }): Promise<CallToolResult> => {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Dynamic echo: ${text}`,
+          },
+        ],
+      };
+    }
+  );
+
+  dynamicTool.disable();
+
+  return {
+    server,
+    dynamicResource,
+    dynamicPrompt,
+    dynamicTool,
+  };
 };
 
 
@@ -381,29 +827,83 @@ async function startHttpServer() {
 
   app.use(express.json());
 
-  app.post("/mcp", async (req: Request, res: Response) => {
-    console.log("Received MCP request:", req.body);
+  app.post('/mcp', async (req: Request, res: Response) => {
+    const sessionId = getHeaderValue(req.headers['mcp-session-id']);
+    console.log('Received MCP POST request:', req.body);
+
     try {
-      const server = getServer();
+      if (sessionId) {
+        const context = sessions.get(sessionId);
+
+        if (!context) {
+          res.status(404).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: `Session ${sessionId} not found.`,
+            },
+            id: null,
+          });
+          return;
+        }
+
+        await context.transport.handleRequest(req, res, req.body);
+        return;
+      }
+
+      if (!isInitializeRequest(req.body)) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: 'Bad Request: initialize must be called before session-bound requests.',
+          },
+          id: null,
+        });
+        return;
+      }
+
+      const serverContext = getServer();
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (initializedSessionId) => {
+          sessions.set(initializedSessionId, {
+            ...serverContext,
+            transport,
+          });
+          console.log(`Session initialized: ${initializedSessionId}`);
+        },
       });
 
-      await server.connect(transport);
+      transport.onclose = () => {
+        const closedSessionId = transport.sessionId;
+
+        if (!closedSessionId) {
+          return;
+        }
+
+        const context = sessions.get(closedSessionId);
+
+        if (!context) {
+          return;
+        }
+
+        stopEventTimer(context);
+        sessions.delete(closedSessionId);
+        void context.server.close();
+        console.log(`Session closed: ${closedSessionId}`);
+      };
+
+      await serverContext.server.connect(transport);
       await transport.handleRequest(req, res, req.body);
-
-      res.on('close', () => {
-        void transport.close();
-        void server.close();
-      });
     } catch (error) {
-      console.error("Error handling MCP request:", error);
+      console.error('Error handling MCP request:', error);
       if (!res.headersSent) {
         res.status(500).json({
-          jsonrpc: "2.0",
+          jsonrpc: '2.0',
           error: {
             code: -32603,
-            message: "Internal server error",
+            message: 'Internal server error',
           },
           id: null,
         });
@@ -411,32 +911,42 @@ async function startHttpServer() {
     }
   });
 
-  app.get("/mcp", async (req: Request, res: Response) => {
-    console.log("Received GET MCP request");
-    res.writeHead(405).end(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        error: {
-          code: -32000,
-          message: "Method not allowed.",
-        },
-        id: null,
-      })
-    );
+  app.get('/mcp', async (req: Request, res: Response) => {
+    const sessionId = getHeaderValue(req.headers['mcp-session-id']);
+
+    if (!sessionId) {
+      res.status(400).send('Missing mcp-session-id header.');
+      return;
+    }
+
+    const context = sessions.get(sessionId);
+
+    if (!context) {
+      res.status(404).send(`Session ${sessionId} not found.`);
+      return;
+    }
+
+    console.log(`Establishing GET SSE stream for session ${sessionId}`);
+    await context.transport.handleRequest(req, res);
   });
 
-  app.delete("/mcp", async (req: Request, res: Response) => {
-    console.log("Received DELETE MCP request");
-    res.writeHead(405).end(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        error: {
-          code: -32000,
-          message: "Method not allowed.",
-        },
-        id: null,
-      })
-    );
+  app.delete('/mcp', async (req: Request, res: Response) => {
+    const sessionId = getHeaderValue(req.headers['mcp-session-id']);
+
+    if (!sessionId) {
+      res.status(400).send('Missing mcp-session-id header.');
+      return;
+    }
+
+    const context = sessions.get(sessionId);
+
+    if (!context) {
+      res.status(404).send(`Session ${sessionId} not found.`);
+      return;
+    }
+
+    console.log(`Received DELETE request for session ${sessionId}`);
+    await context.transport.handleRequest(req, res);
   });
 
   const httpServer = app.listen(MCP_PORT);

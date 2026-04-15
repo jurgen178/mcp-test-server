@@ -5,8 +5,11 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 ## What It Does
 
 - Exposes an MCP endpoint at `POST /mcp`
+- Supports stateful MCP sessions with `mcp-session-id`
+- Supports `GET /mcp` as SSE stream for server-initiated notifications
 - Starts an Express server on port `3000` by default
 - Registers a small set of demo tools for math, text formatting, images, and GitHub API lookups
+- Registers notification and event demos for progress, live resource updates, and dynamic catalog changes
 - Exposes demo resource and demo prompt in addition to the tools
 
 ## Included Tools
@@ -17,15 +20,22 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 - `pixelBadge`: returns a small SVG badge as image content
 - `getGitHubRepoStats`: fetches star and fork counts for a GitHub repository
 - `getHilbertHotelInfo`: returns generated structured sample data
+- `runProgressDemo`: emits `notifications/progress` during a long-running tool call
+- `pushLiveUpdate`: updates a live resource and emits resource/logging notifications
+- `startEventBurst`: emits timed server-side events after the tool already returned
+- `toggleDynamicCatalog`: enables or disables demo tool/prompt/resource entries to trigger `list_changed` notifications
 
 ## Included Resources
 
 - `resorcerer`: returns a compact markdown overview of the server capabilities
+- `live-status`: returns a JSON snapshot used for `notifications/resources/updated` testing
+- `dynamic-note`: optional test resource toggled via `toggleDynamicCatalog`
 
 ## Included Prompts
 
 - `promptsmith`: creates a reusable prompt brief from `goal`, `audience`, and `tone`
 - `ticket-summary`: creates a structured summary for a support ticket
+- `dynamic-event-brief`: optional prompt toggled via `toggleDynamicCatalog`
 
 ## Tool Screenshots
 
@@ -108,9 +118,24 @@ Note: the `build` script currently runs TypeScript with `--noEmit`, so it perfor
 
 ## MCP Endpoint
 
-- `POST /mcp`: handles MCP requests
-- `GET /mcp`: returns `405 Method not allowed`
-- `DELETE /mcp`: returns `405 Method not allowed`
+- `POST /mcp`: handles initialization and session-bound MCP requests
+- `GET /mcp`: opens the SSE stream for an existing MCP session
+- `DELETE /mcp`: terminates an existing MCP session
+
+## Testing Notifications
+
+Recommended test flow for clients that support Streamable HTTP with SSE:
+
+1. Initialize with `POST /mcp` and capture the returned `mcp-session-id` header.
+2. Open `GET /mcp` with the same `mcp-session-id` header to keep the notification stream open.
+3. Call `runProgressDemo` with a `progressToken` to test `notifications/progress`.
+4. Call `pushLiveUpdate` or `startEventBurst` to test `notifications/message` and `notifications/resources/updated`.
+5. Call `toggleDynamicCatalog` to test `notifications/resources/list_changed`, `notifications/prompts/list_changed`, and `notifications/tools/list_changed`.
+
+Notes:
+
+- `startEventBurst` is useful for out-of-band events because the notifications continue after the tool call response has already been returned.
+- `live-status` is the resource that changes when event notifications are emitted.
 
 ## Example Request
 
