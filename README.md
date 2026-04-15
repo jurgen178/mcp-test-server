@@ -63,6 +63,12 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 
 ![getHilbertHotelInfo screenshot](https://github.com/jurgen178/mcp-test-server/blob/main/doc/hilbert.png?raw=true)
 
+### Events
+
+![events screenshot 1](https://github.com/jurgen178/mcp-test-server/blob/main/doc/events1.png?raw=true)
+
+![events screenshot 2](https://github.com/jurgen178/mcp-test-server/blob/main/doc/events2.png?raw=true)
+
 ## Requirements
 
 - Node.js 18 or newer
