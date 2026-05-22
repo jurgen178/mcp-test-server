@@ -357,7 +357,6 @@ mark.hl{background:rgba(86,211,100,.25);border-bottom:2px solid #56d364;border-r
     if(!pat)return;
     var flags=document.getElementById('inp-flags').value||undefined;
     var ts=document.getElementById('inp-ts').value||undefined;
-    document.getElementById('result').innerHTML='<span class="spinner"></span><span style="color:#8b949e;font-size:13px">Analyzing\u2026</span>';
     request('tools/call',{name:'visualizeRegex',arguments:{pattern:pat,flags:flags,testString:ts}})
       .then(function(r){renderSc(r&&r.structuredContent);})
       .catch(function(e){document.getElementById('result').innerHTML='<div class="err">Error: '+esc(String(e))+'</div>';});
