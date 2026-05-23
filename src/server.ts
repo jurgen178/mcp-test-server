@@ -106,28 +106,10 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
             source,
             version: liveState.version,
             updatedAt: liveState.updatedAt,
-            // WHY IS THIS HERE?
-            // Reverse proxies (e.g. Cloudflare) buffer small SSE frames in their TCP
-            // send buffer and only flush when the buffer is "full enough" (~1 TCP segment,
-            // ~1460 bytes) or when the next HTTP request from the client arrives.
-            // Without padding, a single small notification (~300 bytes) gets held
-            // indefinitely, causing the client to see events one click too late (N-1 bug).
-            // The diagnostics object serves dual purpose: genuinely useful server context
-            // AND enough bytes to push the frame past the TCP MSS threshold so the proxy
-            // flushes immediately. Do not remove.
             diagnostics: {
-              uptime: process.uptime(),
-              memory: process.memoryUsage(),
               sessions: sessions.size,
               callCounts: Object.fromEntries(serverStats.callCounts),
               recentCalls: serverStats.recent,
-              serverInfo: {
-                nodeVersion: process.version,
-                platform: process.platform,
-                arch: process.arch,
-                pid: process.pid,
-                startTime: new Date(serverStats.startTime).toISOString(),
-              },
             },
           },
         },
