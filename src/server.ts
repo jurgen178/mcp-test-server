@@ -37,6 +37,7 @@ const serverStats = {
   startTime: Date.now(),
   callCounts: new Map<string, number>(),
   recent: [] as CallRecord[],
+  callTimestamps: [] as number[],  // rolling window for req/min
 };
 
 const getHeaderValue = (value: string | string[] | undefined): string | undefined => {
@@ -1155,9 +1156,9 @@ body {
     var rssPct = Math.min(100, Math.round(sc.memory.rss / (256 * 1024 * 1024) * 100));
     var h = '<div class="content">';
     h += '<div class="cards">';
-    h += '<div class="card"><div class="card-lbl">Active Sessions</div>';
-    h += '<div class="card-val">' + sc.sessions + '</div>';
-    h += '<div class="card-sub">MCP client' + (sc.sessions !== 1 ? 's' : '') + ' connected</div></div>';
+    h += '<div class="card"><div class="card-lbl">Calls / min</div>';
+    h += '<div class="card-val">' + sc.reqPerMin + '</div>';
+    h += '<div class="card-sub">tool calls last 60 s</div></div>';
     h += '<div class="card"><div class="card-lbl">RSS Memory</div>';
     h += '<div class="card-val">' + rssMB + '<span> MB</span></div>';
     h += '<div class="card-sub">resident set size</div>';
@@ -2104,10 +2105,16 @@ const getServer = () => {
       const tools = Array.from(serverStats.callCounts.entries())
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count);
+      const now = Date.now();
+      // prune timestamps older than 60s
+      const cutoff = now - 60_000;
+      while (serverStats.callTimestamps.length > 0 && serverStats.callTimestamps[0] < cutoff) {
+        serverStats.callTimestamps.shift();
+      }
       const structuredContent = {
-        uptime: Date.now() - serverStats.startTime,
+        uptime: now - serverStats.startTime,
         memory: { rss: mem.rss },
-        sessions: sessions.size,
+        reqPerMin: serverStats.callTimestamps.length,
         totalCalls: tools.reduce((s, t) => s + t.count, 0),
         tools,
         recent: serverStats.recent.slice(0, 20),
@@ -2176,9 +2183,11 @@ async function startHttpServer() {
         if (toolName && toolName !== 'getServerStats') {
           const t0 = Date.now();
           res.on('finish', () => {
+            const now = Date.now();
             serverStats.callCounts.set(toolName, (serverStats.callCounts.get(toolName) ?? 0) + 1);
-            serverStats.recent.unshift({ tool: toolName, ms: Date.now() - t0, ts: Date.now() });
+            serverStats.recent.unshift({ tool: toolName, ms: now - t0, ts: now });
             if (serverStats.recent.length > 30) serverStats.recent.pop();
+            serverStats.callTimestamps.push(now);
           });
         }
       }
@@ -2287,16 +2296,6 @@ async function startHttpServer() {
     }
 
     console.log(`Establishing GET SSE stream for session ${sessionId}`);
-    res.on('close', () => {
-      const ctx = sessions.get(sessionId);
-      if (ctx) {
-        stopEventTimer(ctx);
-        removeSessionSubscriptions(sessionId);
-        sessions.delete(sessionId);
-        void ctx.server.close();
-        console.log(`Session closed (SSE dropped): ${sessionId}`);
-      }
-    });
     await context.transport.handleRequest(req, res);
   });
 
