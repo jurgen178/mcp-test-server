@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import express, { Request, Response, NextFunction } from 'express';
 import * as ts from 'typescript';
+import QRCode from 'qrcode';
 import { McpServer, RegisteredPrompt, RegisteredResource, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -905,6 +906,161 @@ tr.added:hover td,tr.removed:hover td{filter:brightness(1.1)}
       await request('ui/initialize',{protocolVersion:'2026-01-26',clientCapabilities:{},clientInfo:{name:'code-diff',version:'1.0'}});
       notify('ui/notifications/initialized');
     }catch(e){document.getElementById('diff').innerHTML='<div class="err">Init failed: '+esc(String(e))+'</div>';}
+  }
+  init();
+})();
+</script>
+</body>
+</html>`;
+}
+
+// MCP App HTML: QR Code Generator
+function getQrCodeHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--mcp-bg,#0d1117);color:var(--mcp-fg,#e6edf3);padding:16px;font-size:14px}
+.controls{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:flex-end}
+.ctrl-group{display:flex;flex-direction:column;gap:4px}
+.ctrl-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--mcp-muted,#8b949e)}
+.ctrl-input{background:var(--mcp-input-bg,#161b22);border:1px solid var(--mcp-input-border,#30363d);border-radius:7px;padding:8px 11px;font-size:13px;color:var(--mcp-fg,#e6edf3);outline:none;width:100%;transition:border-color .15s}
+.ctrl-input:focus{border-color:var(--mcp-accent,#388bfd)}
+select.ctrl-input{cursor:pointer}
+.ctrl-color{padding:3px 5px;height:36px;cursor:pointer;width:52px}
+.qr-wrap{display:flex;justify-content:center;align-items:center;padding:12px;background:var(--mcp-input-bg,#161b22);border:1px solid var(--mcp-input-border,#30363d);border-radius:10px;position:relative;cursor:pointer;transition:border-color .2s;min-height:80px}
+.qr-wrap:hover{border-color:var(--mcp-accent,#388bfd)}
+.qr-wrap svg{max-width:100%;height:auto;display:block;border-radius:4px}
+.placeholder{color:var(--mcp-muted,#8b949e);font-size:13px;text-align:center;padding:24px 16px}
+.copy-hint{position:absolute;bottom:8px;right:10px;font-size:11px;color:var(--mcp-muted,#8b949e);opacity:0;transition:opacity .25s;pointer-events:none}
+.copy-ok{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(13,17,23,.85);border-radius:10px;font-size:15px;font-weight:600;color:var(--mcp-accent,#79c0ff);opacity:0;transition:opacity .3s;pointer-events:none}
+.meta{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+.tag{background:var(--mcp-bg2,#161b22);border:1px solid var(--mcp-border,#30363d);border-radius:5px;padding:3px 9px;font-size:11px;color:var(--mcp-muted,#8b949e)}
+.tag b{color:var(--mcp-fg,#e6edf3)}
+.err{color:var(--mcp-red,#f85149)}
+</style>
+</head>
+<body>
+<div class="controls">
+  <div class="ctrl-group" style="flex:1;min-width:160px">
+    <label class="ctrl-label" for="inp-text">Text / URL</label>
+    <input id="inp-text" class="ctrl-input" type="text" placeholder="Enter text or URL\u2026" oninput="onInput()">
+  </div>
+  <div class="ctrl-group">
+    <label class="ctrl-label" for="sel-ec">Error Correction</label>
+    <select id="sel-ec" class="ctrl-input" style="width:auto" onchange="onInput()">
+      <option value="L">L \u2014 7%</option>
+      <option value="M" selected>M \u2014 15%</option>
+      <option value="Q">Q \u2014 25%</option>
+      <option value="H">H \u2014 30%</option>
+    </select>
+  </div>
+  <div class="ctrl-group">
+    <label class="ctrl-label" for="inp-fg">Dark</label>
+    <input id="inp-fg" class="ctrl-input ctrl-color" type="color" value="#000000" oninput="onInput()">
+  </div>
+  <div class="ctrl-group">
+    <label class="ctrl-label" for="inp-bg">Light</label>
+    <input id="inp-bg" class="ctrl-input ctrl-color" type="color" value="#ffffff" oninput="onInput()">
+  </div>
+</div>
+<div id="qr-wrap" class="qr-wrap" onclick="copyQr()">
+  <div id="qr-display"><p class="placeholder">Type text above or invoke the tool to generate a QR code</p></div>
+  <span class="copy-hint" id="copy-hint">Click to copy</span>
+  <div class="copy-ok" id="copy-ok">\u2713 Copied!</div>
+</div>
+<div class="meta" id="meta"></div>
+<script>
+(function(){
+  var rid=0,pend={};
+  function request(m,p){var id=++rid;return new Promise(function(ok){pend[id]=ok;window.parent.postMessage({jsonrpc:'2.0',id:id,method:m,params:p},'*');});}
+  function notify(m,p){window.parent.postMessage({jsonrpc:'2.0',method:m,params:p},'*');}
+  window.addEventListener('message',function(ev){
+    var msg=ev.data;if(!msg||msg.jsonrpc!=='2.0')return;
+    if(msg.id!==undefined&&pend[msg.id]){pend[msg.id](msg.result);delete pend[msg.id];return;}
+    if(msg.method==='ui/notifications/tool-input'){fillInputs((msg.params||{}).arguments||{});}
+    if(msg.method==='ui/notifications/tool-result'){var item=imgFromContent((msg.params||{}).content);if(item)renderQr(item);}
+  });
+  var debounceTimer=null,lastSvg='';
+  function onInput(){clearTimeout(debounceTimer);debounceTimer=setTimeout(callTool,400);}
+  window.onInput=onInput;
+  async function callTool(){
+    var text=document.getElementById('inp-text').value.trim();
+    if(!text){setEmpty();return;}
+    var params={text:text,errorCorrection:document.getElementById('sel-ec').value,foreground:document.getElementById('inp-fg').value,background:document.getElementById('inp-bg').value};
+    document.getElementById('qr-display').innerHTML='<p class="placeholder" style="color:var(--mcp-accent,#79c0ff);opacity:.65">Generating\u2026</p>';
+    try{
+      var result=await request('tools/call',{name:'generateQrCode',arguments:params});
+      if(result&&result.isError){showError((result.content||[]).map(function(c){return c.text||'';}).join(''));return;}
+      var item=result&&imgFromContent(result.content);
+      if(item)renderQr(item);
+    }catch(e){showError(String(e));}
+  }
+  function fillInputs(a){
+    if(a.text!=null)document.getElementById('inp-text').value=a.text;
+    if(a.errorCorrection)document.getElementById('sel-ec').value=a.errorCorrection;
+    if(a.foreground)document.getElementById('inp-fg').value=a.foreground;
+    if(a.background)document.getElementById('inp-bg').value=a.background;
+  }
+  function imgFromContent(content){
+    if(!Array.isArray(content))return null;
+    return content.find(function(c){return c.type==='image'&&(c.mimeType==='image/png'||c.mimeType==='image/svg+xml');})||null;
+  }
+  function renderQr(item){
+    var src='data:'+item.mimeType+';base64,'+item.data;
+    lastSvg=src;
+    var qd=document.getElementById('qr-display');
+    qd.innerHTML='';
+    var img=document.createElement('img');
+    img.style.cssText='display:block;max-width:100%;height:auto';
+    img.onload=function(){notifySize();};
+    img.src=src;
+    qd.appendChild(img);
+    var text=document.getElementById('inp-text').value.trim();
+    var ec=document.getElementById('sel-ec').value;
+    var m='';
+    if(text){var t=text.length>50?text.slice(0,50)+'\u2026':text;m+='<span class="tag"><b>'+esc(t)+'</b></span>';}
+    if(ec){m+='<span class="tag">EC <b>'+esc(ec)+'</b></span>';}
+    document.getElementById('meta').innerHTML=m;
+    document.getElementById('copy-hint').style.opacity='1';
+  }
+  function setEmpty(){
+    lastSvg='';
+    document.getElementById('qr-display').innerHTML='<p class="placeholder">Type text above or invoke the tool to generate a QR code</p>';
+    document.getElementById('meta').innerHTML='';
+    document.getElementById('copy-hint').style.opacity='0';
+    notifySize();
+  }
+  function showError(msg){
+    document.getElementById('qr-display').innerHTML='<p class="placeholder err">'+esc(msg)+'</p>';
+    notifySize();
+  }
+  function copyQr(){
+    if(!lastSvg)return;
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=lastSvg;
+      ta.style.cssText='position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      var el=document.getElementById('copy-ok');el.style.opacity='1';setTimeout(function(){el.style.opacity='0';},1100);
+    }catch(e){}
+  }
+  window.copyQr=copyQr;
+  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function notifySize(){setTimeout(function(){notify('ui/notifications/size-changed',{height:document.body.scrollHeight+16});},80);}
+  async function init(){
+    try{
+      await request('initialize',{protocolVersion:'2026-01-26',capabilities:{},clientInfo:{name:'qr-code',version:'1.0'}});
+      notify('notifications/initialized');
+      await request('ui/initialize',{protocolVersion:'2026-01-26',clientCapabilities:{},clientInfo:{name:'qr-code',version:'1.0'}});
+      notify('ui/notifications/initialized');
+    }catch(e){}
   }
   init();
 })();
@@ -2094,6 +2250,51 @@ const getServer = () => {
   );
 
   dynamicTool.disable();
+
+  // Register QR Code Generator (MCP App)
+  const QR_UI = 'ui://mcp-test-server/qr-code';
+
+  server.registerTool(
+    'generateQrCode',
+    {
+      title: 'QR Code Generator',
+      description: 'Generates a QR code for any text or URL and renders it as an interactive live-updating visualization',
+      inputSchema: {
+        text: z.string().describe('Text or URL to encode as a QR code'),
+        errorCorrection: z.enum(['L', 'M', 'Q', 'H']).default('M').describe('Error correction level: L=7%, M=15%, Q=25%, H=30%'),
+        foreground: z.string().default('#000000').describe('QR code dark module color (hex, e.g. "#000000")'),
+        background: z.string().default('#ffffff').describe('QR code light module color (hex, e.g. "#ffffff")'),
+      },
+      // @ts-ignore — _meta is part of MCP protocol (spec 2026-01-26) but not yet typed in SDK
+      _meta: { ui: { resourceUri: QR_UI } },
+    },
+    async ({ text, errorCorrection, foreground, background }): Promise<CallToolResult> => {
+      // toDataURL returns "data:image/png;base64,..." — extract the base64 part
+      const dataUrl = await QRCode.toDataURL(text, {
+        errorCorrectionLevel: errorCorrection as 'L' | 'M' | 'Q' | 'H',
+        color: { dark: foreground, light: background },
+        margin: 2,
+        width: 300,
+      });
+      const base64 = dataUrl.slice('data:image/png;base64,'.length);
+      const preview = text.length > 60 ? text.slice(0, 60) + '\u2026' : text;
+      return {
+        content: [
+          { type: 'text', text: `QR code for "${preview}"` },
+          { type: 'image', data: base64, mimeType: 'image/png' },
+        ],
+      };
+    }
+  );
+
+  server.registerResource(
+    'qr-code-ui',
+    QR_UI,
+    { title: 'QR Code UI', description: 'MCP App iframe for interactive QR code generation', mimeType: 'text/html' },
+    async (): Promise<ReadResourceResult> => ({
+      contents: [{ uri: QR_UI, mimeType: 'text/html', text: getQrCodeHtml() }],
+    })
+  );
 
   // Register Server Stats Dashboard (MCP App)
   const STATS_UI = 'ui://mcp-test-server/server-stats';
