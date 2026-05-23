@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import * as ts from 'typescript';
 import { McpServer, RegisteredPrompt, RegisteredResource, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolResult, GetPromptResult, ReadResourceResult, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolResult, GetPromptResult, ReadResourceResult, isInitializeRequest, SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const MCP_PORT = Number(process.env.PORT) || 3000;
@@ -21,12 +21,22 @@ type SessionContext = {
 };
 
 const sessions = new Map<string, SessionContext>();
+// uri → Set of sessionIds that have subscribed to that resource
+const subscriptions = new Map<string, Set<string>>();
 
 const liveState = {
   version: 0,
   message: 'Server started',
   source: 'bootstrap',
   updatedAt: new Date().toISOString(),
+};
+
+// ── Server Stats Tracker ────────────────────────────────────────────────────
+interface CallRecord { tool: string; ms: number; ts: number; }
+const serverStats = {
+  startTime: Date.now(),
+  callCounts: new Map<string, number>(),
+  recent: [] as CallRecord[],
 };
 
 const getHeaderValue = (value: string | string[] | undefined): string | undefined => {
@@ -44,6 +54,12 @@ const updateLiveState = (message: string, source: string) => {
   liveState.message = message;
   liveState.source = source;
   liveState.updatedAt = new Date().toISOString();
+};
+
+const removeSessionSubscriptions = (sessionId: string) => {
+  for (const subs of subscriptions.values()) {
+    subs.delete(sessionId);
+  }
 };
 
 const stopEventTimer = (context: SessionContext) => {
@@ -94,9 +110,11 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
         sessionId
       );
 
-      await context.server.server.sendResourceUpdated({
-        uri: LIVE_RESOURCE_URI,
-      });
+      if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
+        await context.server.server.sendResourceUpdated({
+          uri: LIVE_RESOURCE_URI,
+        });
+      }
     } catch (error) {
       console.error(`Failed to send live update for session ${sessionId}:`, error);
     }
@@ -884,6 +902,323 @@ tr.added:hover td,tr.removed:hover td{filter:brightness(1.1)}
   init();
 })();
 </script>
+</body>
+</html>`;
+}
+
+// MCP App HTML: Server Stats Dashboard
+function getServerStatsDashboardHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--mcp-bg, #0d1117);
+  color: var(--mcp-fg, #e6edf3);
+  font-size: 13px;
+  background-image: radial-gradient(circle, var(--mcp-border, #30363d) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+.hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--mcp-bg2, #161b22);
+  border-bottom: 1px solid var(--mcp-border, #30363d);
+  position: sticky; top: 0; z-index: 10;
+}
+.hdr-l { display: flex; align-items: center; gap: 10px; }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #3fb950;
+  box-shadow: 0 0 8px #3fb950, 0 0 20px rgba(63,185,80,.4);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .5; transform: scale(.8); }
+}
+.srv-name {
+  font-size: 14px;
+  font-weight: 700;
+  font-family: monospace;
+  letter-spacing: 1.5px;
+  color: var(--mcp-fg, #e6edf3);
+}
+.uptime { font-size: 11px; color: var(--mcp-muted, #8b949e); font-family: monospace; }
+.hdr-r { display: flex; align-items: center; }
+.live-badge {
+  font-family: monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: #3fb950;
+  text-shadow: 0 0 8px #3fb950, 0 0 20px rgba(63,185,80,.5);
+  border: 1px solid rgba(63,185,80,.35);
+  padding: 2px 8px;
+  border-radius: 2px;
+  animation: live-pulse 2.5s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; text-shadow: 0 0 8px #3fb950, 0 0 20px rgba(63,185,80,.5); }
+  50% { opacity: .55; text-shadow: 0 0 3px #3fb950; }
+}
+.content { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.card {
+  background: var(--mcp-bg2, #161b22);
+  border: 1px solid var(--mcp-border, #30363d);
+  border-radius: 10px; padding: 14px;
+  position: relative; overflow: hidden;
+}
+.card::after {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, var(--mcp-accent, #388bfd), #a78bfa);
+  opacity: .6;
+}
+.card-lbl {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 1.2px;
+  color: var(--mcp-muted, #8b949e); margin-bottom: 8px;
+}
+.card-val {
+  font-size: 24px; font-weight: 700; font-family: monospace;
+  color: var(--mcp-fg, #e6edf3); line-height: 1;
+}
+.card-val span { font-size: 12px; color: var(--mcp-muted, #8b949e); font-weight: 400; }
+.card-sub { font-size: 10px; color: var(--mcp-muted, #8b949e); margin-top: 4px; }
+.bar-track {
+  height: 5px; background: var(--mcp-border, #30363d);
+  border-radius: 3px; margin-top: 10px; overflow: hidden;
+}
+.bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width .7s cubic-bezier(.4,0,.2,1);
+  background: linear-gradient(90deg, var(--mcp-accent, #388bfd), #a78bfa);
+}
+.bar-fill.warn { background: linear-gradient(90deg, #e3b341, #fb923c); }
+.bar-fill.ok   { background: linear-gradient(90deg, #3fb950, #34d399); }
+.sec-hdr {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 1.2px;
+  color: var(--mcp-muted, #8b949e);
+}
+.tools { display: flex; flex-direction: column; gap: 5px; }
+.tool-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--mcp-bg2, #161b22);
+  border: 1px solid var(--mcp-border, #30363d);
+  border-radius: 7px; padding: 7px 12px;
+  transition: border-color .2s;
+}
+.tool-row:hover { border-color: var(--mcp-accent, #388bfd); }
+.tool-nm {
+  font-family: monospace; font-size: 12px;
+  color: var(--mcp-fg, #e6edf3);
+  flex: 0 0 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-bar-wrap { flex: 1; height: 4px; background: var(--mcp-border, #30363d); border-radius: 2px; overflow: hidden; }
+.tool-bar {
+  height: 100%; border-radius: 2px;
+  transition: width .7s cubic-bezier(.4,0,.2,1);
+  background: linear-gradient(90deg, #388bfd, #a78bfa);
+}
+.tool-cnt { font-family: monospace; font-size: 11px; color: var(--mcp-muted, #8b949e); flex: 0 0 28px; text-align: right; }
+.feed { display: flex; flex-direction: column; gap: 4px; }
+.idle {
+  padding: 32px 0; text-align: center;
+  color: var(--mcp-fg2, #8b949e); font-size: 13px; font-style: italic;
+}
+.feed-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--mcp-bg2, #161b22);
+  border: 1px solid var(--mcp-border, #30363d);
+  border-radius: 7px; padding: 6px 12px;
+}
+.feed-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.d-fast { background: #3fb950; box-shadow: 0 0 6px rgba(63,185,80,.6); }
+.d-med  { background: #e3b341; box-shadow: 0 0 6px rgba(227,179,65,.6); }
+.d-slow { background: #f85149; box-shadow: 0 0 6px rgba(248,81,73,.6); }
+.feed-nm { font-family: monospace; font-size: 12px; color: var(--mcp-fg, #e6edf3); flex: 1; }
+.feed-ms { font-family: monospace; font-size: 11px; color: var(--mcp-muted, #8b949e); flex: 0 0 48px; text-align: right; }
+.feed-ago { font-size: 11px; color: var(--mcp-muted, #8b949e); flex: 0 0 66px; text-align: right; opacity: .7; }
+.empty { color: var(--mcp-muted, #8b949e); font-style: italic; font-size: 12px; }
+.connecting { text-align: center; padding: 40px 20px; color: var(--mcp-muted, #8b949e); }
+.mat-wrap { position: relative; background: #000; border-bottom: 1px solid rgba(0,200,68,.18); overflow: hidden; height: 68px; flex-shrink: 0; }
+.mat-lbl { position: absolute; top: 5px; left: 8px; font-family: monospace; font-size: 9px; letter-spacing: 2px; color: #3fb950; text-shadow: 0 0 6px #3fb950; z-index: 1; pointer-events: none; }
+#mat-canvas { display: block; width: 100%; height: 68px; }
+</style>
+</head>
+<body>
+<div class="hdr" style="display:none">
+  <div class="hdr-l">
+    <div class="live-dot"></div>
+    <span class="srv-name">mcp-test-server</span>
+    <span class="uptime" id="uptime-el">connecting…</span>
+  </div>
+  <div class="hdr-r">
+    <span class="live-badge">live</span>
+  </div>
+</div>
+<div class="mat-wrap" id="mat-wrap" style="display:none">
+  <span class="mat-lbl">SYS::STREAM</span>
+  <canvas id="mat-canvas" height="68"></canvas>
+</div>
+<div id="root"><div class="idle">Run Tool to load dashboard</div></div>
+<script>
+(function() {
+  var rid = 0, pend = {};
+  function request(m, p) {
+    var id = ++rid;
+    return new Promise(function(resolve) {
+      pend[id] = resolve;
+      window.parent.postMessage({ jsonrpc: '2.0', id: id, method: m, params: p }, '*');
+    });
+  }
+  function notify(m, p) {
+    window.parent.postMessage({ jsonrpc: '2.0', method: m, params: p }, '*');
+  }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  function fmtUp(ms) {
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h > 0) return h + 'h ' + pad(m) + 'm ' + pad(sec) + 's';
+    if (m > 0) return m + 'm ' + pad(sec) + 's';
+    return sec + 's';
+  }
+  function fmtMB(b) { return (b / 1024 / 1024).toFixed(1); }
+  function ago(ts) {
+    var s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 5) return 'now'; if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    return Math.floor(s / 3600) + 'h ago';
+  }
+  var uptimeBase = 0, uptimeRef = 0, lastH = 0, polling = false, startMatrix = null;
+  window.addEventListener('message', function(ev) {
+    var msg = ev.data;
+    if (!msg || msg.jsonrpc !== '2.0') return;
+    if (msg.id !== undefined && pend[msg.id]) { pend[msg.id](msg.result); delete pend[msg.id]; return; }
+    if (msg.method === 'ui/notifications/tool-result' && !polling) {
+      var sc = msg.params && msg.params.structuredContent;
+      if (sc) {
+        polling = true;
+        document.querySelector('.hdr').style.display = 'flex';
+        document.getElementById('mat-wrap').style.display = 'block';
+        if (startMatrix) startMatrix();
+        poll();
+        setInterval(poll, 3000);
+      }
+    }
+  });
+  // Matrix rain — init after layout so offsetWidth is correct
+  var MCHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF';
+  (function() {
+    var mc = document.getElementById('mat-canvas');
+    if (!mc) return;
+    var mctx = mc.getContext('2d'), fs = 12, mdrops = [];
+    startMatrix = function() {
+      mc.width = mc.offsetWidth || 600;
+      var cols = Math.floor(mc.width / fs);
+      for (var i = 0; i < cols; i++) mdrops.push(Math.random() * -20);
+      setInterval(function() {
+        var nc = Math.floor(mc.width / fs);
+        while (mdrops.length < nc) mdrops.push(0);
+        mdrops = mdrops.slice(0, nc);
+        mctx.fillStyle = 'rgba(0,0,0,0.07)';
+        mctx.fillRect(0, 0, mc.width, mc.height);
+        mctx.font = fs + 'px monospace';
+        for (var i = 0; i < mdrops.length; i++) {
+          var ch = MCHARS[Math.floor(Math.random() * MCHARS.length)];
+          var y = mdrops[i] * fs;
+          mctx.fillStyle = '#afffaf'; mctx.fillText(ch, i * fs, y);
+          if (mdrops[i] > 1) { mctx.fillStyle = '#00cc44'; mctx.fillText(MCHARS[Math.floor(Math.random() * MCHARS.length)], i * fs, y - fs); }
+          if (y > mc.height && Math.random() > 0.95) mdrops[i] = 0;
+          mdrops[i] += 0.25;
+        }
+      }, 33);
+    };
+    // startMatrix is called from tool-result handler
+  })();
+  setInterval(function() {
+    if (!uptimeRef) return;
+    document.getElementById('uptime-el').textContent = '\u2191 ' + fmtUp(uptimeBase + (Date.now() - uptimeRef));
+  }, 1000);
+  function render(sc) {
+    uptimeBase = sc.uptime; uptimeRef = Date.now();
+    var rssMB = fmtMB(sc.memory.rss);
+    var rssPct = Math.min(100, Math.round(sc.memory.rss / (256 * 1024 * 1024) * 100));
+    var h = '<div class="content">';
+    h += '<div class="cards">';
+    h += '<div class="card"><div class="card-lbl">Active Sessions</div>';
+    h += '<div class="card-val">' + sc.sessions + '</div>';
+    h += '<div class="card-sub">MCP client' + (sc.sessions !== 1 ? 's' : '') + ' connected</div></div>';
+    h += '<div class="card"><div class="card-lbl">RSS Memory</div>';
+    h += '<div class="card-val">' + rssMB + '<span> MB</span></div>';
+    h += '<div class="card-sub">resident set size</div>';
+    h += '<div class="bar-track"><div class="bar-fill ok" style="width:' + rssPct + '%"></div></div></div>';
+    h += '<div class="card"><div class="card-lbl">Total Calls</div>';
+    h += '<div class="card-val">' + sc.totalCalls + '</div>';
+    h += '<div class="card-sub">' + sc.tools.length + ' tool' + (sc.tools.length !== 1 ? 's' : '') + ' active</div></div>';
+    h += '</div>';
+    h += '<div class="sec-hdr">Tool Activity</div>';
+    if (sc.tools.length) {
+      var maxC = sc.tools[0].count || 1;
+      h += '<div class="tools">';
+      sc.tools.slice(0, 8).forEach(function(t) {
+        var pct = Math.round(t.count / maxC * 100);
+        h += '<div class="tool-row"><div class="tool-nm">' + esc(t.name) + '</div>';
+        h += '<div class="tool-bar-wrap"><div class="tool-bar" style="width:' + pct + '%"></div></div>';
+        h += '<div class="tool-cnt">' + t.count + '</div></div>';
+      });
+      h += '</div>';
+    } else {
+      h += '<p class="empty">No tool calls yet \u2014 invoke some tools to see activity.</p>';
+    }
+    h += '<div class="sec-hdr">Recent Calls</div>';
+    if (sc.recent && sc.recent.length) {
+      h += '<div class="feed">';
+      sc.recent.slice(0, 10).forEach(function(r) {
+        var dc = r.ms < 100 ? 'd-fast' : r.ms < 500 ? 'd-med' : 'd-slow';
+        h += '<div class="feed-row"><div class="feed-dot ' + dc + '"></div>';
+        h += '<div class="feed-nm">' + esc(r.tool) + '</div>';
+        h += '<div class="feed-ms">' + r.ms + 'ms</div>';
+        h += '<div class="feed-ago">' + ago(r.ts) + '</div></div>';
+      });
+      h += '</div>';
+    } else {
+      h += '<p class="empty">No recent calls yet.</p>';
+    }
+    h += '</div>';
+    document.getElementById('root').innerHTML = h;
+    var newH = document.body.scrollHeight + 16;
+    if (newH !== lastH) { lastH = newH; notify('ui/notifications/size-changed', { height: newH }); }
+  }
+  async function poll() {
+    try {
+      var r = await request('tools/call', { name: 'getServerStats', arguments: {} });
+      if (r && r.structuredContent) render(r.structuredContent);
+    } catch(e) {}
+  }
+  async function init() {
+    try {
+      await request('initialize', { protocolVersion: '2026-01-26', capabilities: {}, clientInfo: { name: 'stats-dashboard', version: '1.0' } });
+      notify('notifications/initialized');
+      await request('ui/initialize', { protocolVersion: '2026-01-26', clientCapabilities: {}, clientInfo: { name: 'stats-dashboard', version: '1.0' } });
+      notify('ui/notifications/initialized');
+      // polling starts on first tool-result from host
+    } catch(e) {
+      document.getElementById('root').innerHTML = '<p style="color:var(--mcp-red,#f85149);padding:20px">Error: ' + esc(String(e)) + '</p>';
+    }
+  }
+  window.addEventListener('DOMContentLoaded', init);
+})();
+<\/script>
 </body>
 </html>`;
 }
@@ -1753,6 +2088,65 @@ const getServer = () => {
 
   dynamicTool.disable();
 
+  // Register Server Stats Dashboard (MCP App)
+  const STATS_UI = 'ui://mcp-test-server/server-stats';
+  server.registerTool(
+    'getServerStats',
+    {
+      title: 'Server Stats',
+      description: 'Live server dashboard: uptime, memory usage, and per-tool call counts',
+      inputSchema: {},
+      // @ts-ignore
+      _meta: { ui: { resourceUri: STATS_UI } },
+    },
+    async (): Promise<CallToolResult> => {
+      const mem = process.memoryUsage();
+      const tools = Array.from(serverStats.callCounts.entries())
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
+      const structuredContent = {
+        uptime: Date.now() - serverStats.startTime,
+        memory: { rss: mem.rss },
+        sessions: sessions.size,
+        totalCalls: tools.reduce((s, t) => s + t.count, 0),
+        tools,
+        recent: serverStats.recent.slice(0, 20),
+      };
+      const upSec = Math.floor(structuredContent.uptime / 1000);
+      return {
+        content: [{ type: 'text', text: `Server up ${upSec}s, ${structuredContent.totalCalls} total calls` }],
+        structuredContent,
+      } as CallToolResult & { structuredContent: unknown };
+    }
+  );
+
+  server.registerResource(
+    'server-stats-ui',
+    STATS_UI,
+    { title: 'Server Stats UI', description: 'Live MCP App dashboard for server statistics', mimeType: 'text/html' },
+    async (): Promise<ReadResourceResult> => ({
+      contents: [{ uri: STATS_UI, mimeType: 'text/html', text: getServerStatsDashboardHtml() }],
+    })
+  );
+
+  // Spec-konformes resources/subscribe und resources/unsubscribe
+  server.server.setRequestHandler(SubscribeRequestSchema, async (req, extra) => {
+    const uri = req.params.uri;
+    const sid = extra.sessionId;
+    if (sid) {
+      if (!subscriptions.has(uri)) subscriptions.set(uri, new Set());
+      subscriptions.get(uri)!.add(sid);
+    }
+    return {};
+  });
+
+  server.server.setRequestHandler(UnsubscribeRequestSchema, async (req, extra) => {
+    const uri = req.params.uri;
+    const sid = extra.sessionId;
+    if (sid) subscriptions.get(uri)?.delete(sid);
+    return {};
+  });
+
   return {
     server,
     dynamicResource,
@@ -1772,6 +2166,25 @@ async function startHttpServer() {
   app.use(cors()); // enabling CORS for any unknown origin
 
   app.use(express.json());
+
+  // Track tool call stats for the Server Stats Dashboard (MCP App)
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method === 'POST') {
+      const body = req.body as Record<string, unknown> | undefined;
+      if (body?.method === 'tools/call') {
+        const toolName = (body.params as Record<string, unknown> | undefined)?.name as string | undefined;
+        if (toolName && toolName !== 'getServerStats') {
+          const t0 = Date.now();
+          res.on('finish', () => {
+            serverStats.callCounts.set(toolName, (serverStats.callCounts.get(toolName) ?? 0) + 1);
+            serverStats.recent.unshift({ tool: toolName, ms: Date.now() - t0, ts: Date.now() });
+            if (serverStats.recent.length > 30) serverStats.recent.pop();
+          });
+        }
+      }
+    }
+    next();
+  });
 
   app.post('/mcp', async (req: Request, res: Response) => {
     const sessionId = getHeaderValue(req.headers['mcp-session-id']);
@@ -1835,6 +2248,7 @@ async function startHttpServer() {
         }
 
         stopEventTimer(context);
+        removeSessionSubscriptions(closedSessionId);
         sessions.delete(closedSessionId);
         void context.server.close();
         console.log(`Session closed: ${closedSessionId}`);
@@ -1873,6 +2287,16 @@ async function startHttpServer() {
     }
 
     console.log(`Establishing GET SSE stream for session ${sessionId}`);
+    res.on('close', () => {
+      const ctx = sessions.get(sessionId);
+      if (ctx) {
+        stopEventTimer(ctx);
+        removeSessionSubscriptions(sessionId);
+        sessions.delete(sessionId);
+        void ctx.server.close();
+        console.log(`Session closed (SSE dropped): ${sessionId}`);
+      }
+    });
     await context.transport.handleRequest(req, res);
   });
 
