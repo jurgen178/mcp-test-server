@@ -111,11 +111,13 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
         sessionId
       );
 
-      if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
-        await context.server.server.sendResourceUpdated({
-          uri: LIVE_RESOURCE_URI,
-        });
-      }
+      // Always send sendResourceUpdated, regardless of subscription.
+      // A single small SSE frame gets buffered by reverse proxies until more data arrives.
+      // Two frames guarantee the first (sendLoggingMessage) is flushed to the client.
+      // Subscribed sessions receive the semantically correct notification either way.
+      await context.server.server.sendResourceUpdated({
+        uri: LIVE_RESOURCE_URI,
+      });
     } catch (error) {
       console.error(`Failed to send live update for session ${sessionId}:`, error);
     }
