@@ -117,11 +117,11 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
       );
 
       // If the session is subscribed to the live resource, send a resource updated event
-      //if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
+      if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
         await context.server.server.sendResourceUpdated({
           uri: LIVE_RESOURCE_URI,
         });
-      //}
+      }
     } catch (error) {
       console.error(`Failed to send live update for session ${sessionId}:`, error);
     }
