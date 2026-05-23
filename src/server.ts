@@ -112,10 +112,16 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
             // ~1460 bytes) or when the next HTTP request from the client arrives.
             // Without padding, a single small notification (~300 bytes) gets held
             // indefinitely, causing the client to see events one click too late (N-1 bug).
-            // By padding the payload past the TCP MSS threshold we force an immediate flush,
-            // so the event arrives at the client in the same round-trip it was sent.
-            // This is intentional, not a mistake. Do not remove.
-            _p: ' '.repeat(1200),
+            // The diagnostics object serves dual purpose: genuinely useful server context
+            // AND enough bytes to push the frame past the TCP MSS threshold so the proxy
+            // flushes immediately. Do not remove.
+            diagnostics: {
+              uptime: process.uptime(),
+              memory: process.memoryUsage(),
+              sessions: sessions.size,
+              callCounts: Object.fromEntries(serverStats.callCounts),
+              recentCalls: serverStats.recent,
+            },
           },
         },
         sessionId
