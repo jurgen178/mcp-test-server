@@ -106,11 +106,17 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
             source,
             version: liveState.version,
             updatedAt: liveState.updatedAt,
+            diagnostics: {
+              sessions: sessions.size,
+              callCounts: Object.fromEntries(serverStats.callCounts),
+              recentCalls: serverStats.recent,
+            },
           },
         },
         sessionId
       );
 
+      // If the session is subscribed to the live resource, send a resource updated event
       if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
         await context.server.server.sendResourceUpdated({
           uri: LIVE_RESOURCE_URI,
