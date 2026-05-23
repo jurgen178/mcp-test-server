@@ -106,18 +106,26 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
             source,
             version: liveState.version,
             updatedAt: liveState.updatedAt,
+            // WHY IS THIS HERE?
+            // Reverse proxies (e.g. Cloudflare) buffer small SSE frames in their TCP
+            // send buffer and only flush when the buffer is "full enough" (~1 TCP segment,
+            // ~1460 bytes) or when the next HTTP request from the client arrives.
+            // Without padding, a single small notification (~300 bytes) gets held
+            // indefinitely, causing the client to see events one click too late (N-1 bug).
+            // By padding the payload past the TCP MSS threshold we force an immediate flush,
+            // so the event arrives at the client in the same round-trip it was sent.
+            // This is intentional, not a mistake. Do not remove.
+            _p: ' '.repeat(1200),
           },
         },
         sessionId
       );
 
-      // Always send sendResourceUpdated, regardless of subscription.
-      // A single small SSE frame gets buffered by reverse proxies until more data arrives.
-      // Two frames guarantee the first (sendLoggingMessage) is flushed to the client.
-      // Subscribed sessions receive the semantically correct notification either way.
-      await context.server.server.sendResourceUpdated({
-        uri: LIVE_RESOURCE_URI,
-      });
+      if (subscriptions.get(LIVE_RESOURCE_URI)?.has(sessionId)) {
+        await context.server.server.sendResourceUpdated({
+          uri: LIVE_RESOURCE_URI,
+        });
+      }
     } catch (error) {
       console.error(`Failed to send live update for session ${sessionId}:`, error);
     }
