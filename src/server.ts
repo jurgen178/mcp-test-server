@@ -121,6 +121,13 @@ const emitLiveUpdate = async (message: string, source: string, sessionIds?: stri
               sessions: sessions.size,
               callCounts: Object.fromEntries(serverStats.callCounts),
               recentCalls: serverStats.recent,
+              serverInfo: {
+                nodeVersion: process.version,
+                platform: process.platform,
+                arch: process.arch,
+                pid: process.pid,
+                startTime: new Date(serverStats.startTime).toISOString(),
+              },
             },
           },
         },
