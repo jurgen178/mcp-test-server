@@ -1250,7 +1250,8 @@ body {
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function fmtUp(ms) {
     var s = Math.floor(ms / 1000);
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (d > 0) return d + 'd ' + h + 'h ' + pad(m) + 'm ' + pad(sec) + 's';
     if (h > 0) return h + 'h ' + pad(m) + 'm ' + pad(sec) + 's';
     if (m > 0) return m + 'm ' + pad(sec) + 's';
     return sec + 's';
@@ -2327,8 +2328,10 @@ const getServer = () => {
         recent: serverStats.recent.slice(0, 20),
       };
       const upSec = Math.floor(structuredContent.uptime / 1000);
+      const _d = Math.floor(upSec / 86400), _h = Math.floor((upSec % 86400) / 3600), _m = Math.floor((upSec % 3600) / 60), _s = upSec % 60;
+      const upStr = _d > 0 ? `${_d}d ${_h}h ${_m}m ${_s}s` : _h > 0 ? `${_h}h ${_m}m ${_s}s` : _m > 0 ? `${_m}m ${_s}s` : `${_s}s`;
       return {
-        content: [{ type: 'text', text: `Server up ${upSec}s, ${structuredContent.totalCalls} total calls` }],
+        content: [{ type: 'text', text: `Server up ${upStr}, ${structuredContent.totalCalls} total calls` }],
         structuredContent,
       } as CallToolResult & { structuredContent: unknown };
     }
