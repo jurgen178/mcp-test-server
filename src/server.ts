@@ -11,6 +11,7 @@ import { z } from 'zod';
 const MCP_PORT = Number(process.env.PORT) || 3000;
 const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
 const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
+const EVENT_BURST_INITIAL_DELAY_MS = 1500;
 
 type SessionContext = {
   server: McpServer;
@@ -300,7 +301,7 @@ const startEventBurst = (sessionId: string, ticks: number, delayMs: number) => {
 
   let currentTick = 0;
 
-  context.eventTimer = setInterval(() => {
+  const emitTick = () => {
     const activeContext = sessions.get(sessionId);
 
     if (!activeContext) {
@@ -317,7 +318,23 @@ const startEventBurst = (sessionId: string, ticks: number, delayMs: number) => {
     if (currentTick >= ticks) {
       stopEventTimer(activeContext);
     }
-  }, delayMs);
+  };
+
+  const initialTimer = setTimeout(() => {
+    const activeContext = sessions.get(sessionId);
+
+    if (!activeContext || activeContext.eventTimer !== initialTimer) {
+      return;
+    }
+
+    emitTick();
+
+    if (currentTick < ticks) {
+      activeContext.eventTimer = setInterval(emitTick, delayMs);
+    }
+  }, EVENT_BURST_INITIAL_DELAY_MS);
+
+  context.eventTimer = initialTimer;
 
   return true;
 };
@@ -1850,7 +1867,7 @@ const getServer = () => {
     'startEventBurst',
     {
       title: 'Start Event Burst',
-      description: 'Starts a short timer that emits live resource update notifications after the tool has already returned',
+      description: 'Starts a short delayed timer that emits live resource update notifications after the tool has already returned',
       inputSchema: {
         ticks: z.number().int().min(1).max(20).default(5).describe('Number of timed notifications to emit'),
         delayMs: z.number().int().min(100).max(5000).default(1000).describe('Delay between emitted events in milliseconds'),
