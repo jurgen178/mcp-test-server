@@ -11,7 +11,7 @@ import { z } from 'zod';
 const MCP_PORT = Number(process.env.PORT) || 3000;
 const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
 const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
-const EVENT_BURST_INITIAL_DELAY_MS = 1500;
+const EVENT_BURST_INITIAL_DELAY_MS = 2500;
 
 type SessionContext = {
   server: McpServer;
