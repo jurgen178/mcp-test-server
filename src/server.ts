@@ -20,6 +20,7 @@ type SessionContext = {
   dynamicPrompt: RegisteredPrompt;
   dynamicTool: RegisteredTool;
   eventTimer?: NodeJS.Timeout;
+  eventBurstId?: string;
 };
 
 const sessions = new Map<string, SessionContext>();
@@ -230,6 +231,7 @@ const stopEventTimer = (context: SessionContext) => {
     clearInterval(context.eventTimer);
     context.eventTimer = undefined;
   }
+  context.eventBurstId = undefined;
 };
 
 const setEnabledState = (
@@ -300,41 +302,46 @@ const startEventBurst = (sessionId: string, ticks: number, delayMs: number) => {
   stopEventTimer(context);
 
   let currentTick = 0;
+  const burstId = randomUUID();
+  context.eventBurstId = burstId;
 
-  const emitTick = () => {
+  const scheduleNextTick = (waitMs: number) => {
     const activeContext = sessions.get(sessionId);
 
-    if (!activeContext) {
+    if (!activeContext || activeContext.eventBurstId !== burstId) {
       return;
     }
 
-    currentTick += 1;
-    void emitLiveUpdate(
-      `Event burst tick ${currentTick}/${ticks}`,
-      'event-burst',
-      [sessionId]
-    );
+    activeContext.eventTimer = setTimeout(async () => {
+      const currentContext = sessions.get(sessionId);
 
-    if (currentTick >= ticks) {
-      stopEventTimer(activeContext);
-    }
+      if (!currentContext || currentContext.eventBurstId !== burstId) {
+        return;
+      }
+
+      currentTick += 1;
+      await emitLiveUpdate(
+        `Event burst tick ${currentTick}/${ticks}`,
+        'event-burst',
+        [sessionId]
+      );
+
+      const latestContext = sessions.get(sessionId);
+
+      if (!latestContext || latestContext.eventBurstId !== burstId) {
+        return;
+      }
+
+      if (currentTick >= ticks) {
+        stopEventTimer(latestContext);
+        return;
+      }
+
+      scheduleNextTick(delayMs);
+    }, waitMs);
   };
 
-  const initialTimer = setTimeout(() => {
-    const activeContext = sessions.get(sessionId);
-
-    if (!activeContext || activeContext.eventTimer !== initialTimer) {
-      return;
-    }
-
-    emitTick();
-
-    if (currentTick < ticks) {
-      activeContext.eventTimer = setInterval(emitTick, delayMs);
-    }
-  }, EVENT_BURST_INITIAL_DELAY_MS);
-
-  context.eventTimer = initialTimer;
+  scheduleNextTick(EVENT_BURST_INITIAL_DELAY_MS);
 
   return true;
 };
