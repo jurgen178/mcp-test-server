@@ -4,14 +4,55 @@ import * as ts from 'typescript';
 import QRCode from 'qrcode';
 import { McpServer, RegisteredPrompt, RegisteredResource, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolResult, GetPromptResult, ReadResourceResult, isInitializeRequest, SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { StreamableHTTPServerTransport, type EventStore, type EventId, type StreamId } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolResult, GetPromptResult, JSONRPCMessage, ReadResourceResult, isInitializeRequest, SubscribeRequestSchema, UnsubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 const MCP_PORT = Number(process.env.PORT) || 3000;
 const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
 const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
-const EVENT_BURST_INITIAL_DELAY_MS = 2500;
+const EVENT_BURST_INITIAL_DELAY_MS = 1000;
+const MAX_STORED_SSE_EVENTS = 1000;
+
+class InMemoryEventStore implements EventStore {
+  private readonly events = new Map<EventId, { streamId: StreamId; message: JSONRPCMessage; sequence: number }>();
+  private sequence = 0;
+
+  async storeEvent(streamId: StreamId, message: JSONRPCMessage): Promise<EventId> {
+    const eventId = `${Date.now()}-${++this.sequence}`;
+    this.events.set(eventId, { streamId, message, sequence: this.sequence });
+
+    while (this.events.size > MAX_STORED_SSE_EVENTS) {
+      const oldestEventId = this.events.keys().next().value as EventId | undefined;
+      if (!oldestEventId) break;
+      this.events.delete(oldestEventId);
+    }
+
+    return eventId;
+  }
+
+  async getStreamIdForEventId(eventId: EventId): Promise<StreamId | undefined> {
+    return this.events.get(eventId)?.streamId;
+  }
+
+  async replayEventsAfter(lastEventId: EventId, { send }: { send: (eventId: EventId, message: JSONRPCMessage) => Promise<void> }): Promise<StreamId> {
+    const lastEvent = this.events.get(lastEventId);
+
+    if (!lastEvent) {
+      return '';
+    }
+
+    const replayEvents = [...this.events.entries()]
+      .filter(([, event]) => event.streamId === lastEvent.streamId && event.sequence > lastEvent.sequence)
+      .sort((left, right) => left[1].sequence - right[1].sequence);
+
+    for (const [eventId, event] of replayEvents) {
+      await send(eventId, event.message);
+    }
+
+    return lastEvent.streamId;
+  }
+}
 
 type SessionContext = {
   server: McpServer;
@@ -2746,6 +2787,7 @@ async function startHttpServer() {
       const serverContext = getServer();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
+        eventStore: new InMemoryEventStore(),
         onsessioninitialized: (initializedSessionId) => {
           sessions.set(initializedSessionId, {
             ...serverContext,
