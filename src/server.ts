@@ -41,6 +41,78 @@ const serverStats = {
   callTimestamps: [] as number[],  // rolling window for req/min
 };
 
+const DIAGNOSTIC_TOOLS = [
+  {
+    name: 'TEST_valid_json_invalid_mcp_shape',
+    title: 'TEST - Valid JSON, Invalid MCP Shape',
+    description: 'Intentionally returns HTTP 200 with valid JSON whose tools/call result has an invalid MCP shape.',
+  },
+  {
+    name: 'TEST_json_response_invalid_json',
+    title: 'TEST - Invalid JSON Response',
+    description: 'Intentionally returns HTTP 200 with an invalid JSON response body.',
+  },
+  {
+    name: 'TEST_sse_data_invalid_json',
+    title: 'TEST - SSE Data Invalid JSON',
+    description: 'Intentionally returns HTTP 200 as SSE where the data field is not valid JSON. This test ends with a 60s timeout.',
+  },
+  {
+    name: 'TEST_sse_data_invalid_mcp_shape',
+    title: 'TEST - SSE Data Invalid MCP Shape',
+    description: 'Intentionally returns HTTP 200 as SSE with valid JSON whose MCP result shape is invalid.',
+  },
+  {
+    name: 'TEST_http_500_error',
+    title: 'TEST - HTTP 500 Error',
+    description: 'Intentionally returns HTTP 500 to verify normal HTTP failures do not use the raw-response SDK rejection diagnostic.',
+  },
+  {
+    name: 'TEST_http_200_empty_body',
+    title: 'TEST - HTTP 200 Empty Body',
+    description: 'Intentionally returns HTTP 200 with an empty body to test empty-response handling.',
+  },
+  {
+    name: 'TEST_large_sse_invalid_mcp_shape',
+    title: 'TEST - Large SSE Invalid MCP Shape',
+    description: 'Intentionally returns a large HTTP 200 SSE message with valid JSON whose MCP result shape is invalid. The diagnostic blob contains exact Pi digits.',
+  },
+] as const;
+
+const LARGE_DIAGNOSTIC_BLOB_LENGTH = 33 * 1024;
+
+const createPiDiagnosticBlob = (length: number): string => {
+  const guardDigits = 10;
+  const significantDigits = length - 1;
+  const scale = 10n ** BigInt(significantDigits + guardDigits);
+
+  const atanInverse = (denominator: number): bigint => {
+    const denominatorBig = BigInt(denominator);
+    const denominatorSquared = denominatorBig * denominatorBig;
+    let term = scale / denominatorBig;
+    let sum = term;
+    let divisor = 1n;
+    let add = false;
+
+    while (term !== 0n) {
+      term /= denominatorSquared;
+      divisor += 2n;
+      const delta = term / divisor;
+      sum = add ? sum + delta : sum - delta;
+      add = !add;
+    }
+
+    return sum;
+  };
+
+  const piScaled = (16n * atanInverse(5) - 4n * atanInverse(239)) / (10n ** BigInt(guardDigits));
+  const piDigits = piScaled.toString().padEnd(significantDigits, '0').slice(0, significantDigits);
+  return `${piDigits[0]}.${piDigits.slice(1)}`;
+};
+
+type DiagnosticToolName = typeof DIAGNOSTIC_TOOLS[number]['name'];
+type JsonRpcId = string | number | null;
+
 const getHeaderValue = (value: string | string[] | undefined): string | undefined => {
   if (Array.isArray(value)) {
     return value[0];
@@ -50,6 +122,94 @@ const getHeaderValue = (value: string | string[] | undefined): string | undefine
 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null;
+};
+
+const isDiagnosticToolName = (name: unknown): name is DiagnosticToolName => {
+  return typeof name === 'string' && DIAGNOSTIC_TOOLS.some(tool => tool.name === name);
+};
+
+const getJsonRpcId = (body: unknown): JsonRpcId => {
+  if (!isObjectRecord(body)) {
+    return null;
+  }
+
+  return typeof body.id === 'string' || typeof body.id === 'number' || body.id === null
+    ? body.id
+    : null;
+};
+
+const getToolCallName = (body: unknown): string | undefined => {
+  if (!isObjectRecord(body) || body.method !== 'tools/call' || !isObjectRecord(body.params)) {
+    return undefined;
+  }
+
+  return typeof body.params.name === 'string' ? body.params.name : undefined;
+};
+
+const createInvalidMcpCallResultResponse = (id: JsonRpcId, label: string, extra?: Record<string, unknown>) => ({
+  jsonrpc: '2.0',
+  id,
+  result: {
+    content: 'This is intentionally invalid. MCP tools/call result content must be an array.',
+    diagnosticLabel: label,
+    ...extra,
+  },
+});
+
+const writeSseMessage = (res: Response, payload: string) => {
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.write(`event: message\ndata: ${payload}\n\n`);
+  res.end();
+};
+
+const handleDiagnosticToolCall = (req: Request, res: Response): boolean => {
+  const toolName = getToolCallName(req.body);
+  if (!isDiagnosticToolName(toolName)) {
+    return false;
+  }
+
+  const id = getJsonRpcId(req.body);
+
+  switch (toolName) {
+    case 'TEST_valid_json_invalid_mcp_shape':
+      res.status(200).json(createInvalidMcpCallResultResponse(id, toolName));
+      return true;
+    case 'TEST_json_response_invalid_json':
+      res.status(200).type('application/json').send('{ "jsonrpc": "2.0", "result": ');
+      return true;
+    case 'TEST_sse_data_invalid_json':
+      writeSseMessage(res, 'this is intentionally not JSON');
+      return true;
+    case 'TEST_sse_data_invalid_mcp_shape':
+      writeSseMessage(res, JSON.stringify(createInvalidMcpCallResultResponse(id, toolName)));
+      return true;
+    case 'TEST_http_500_error':
+      res.status(500).json({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32603,
+          message: 'Intentional HTTP 500 from TEST_http_500_error.',
+        },
+      });
+      return true;
+    case 'TEST_http_200_empty_body':
+      res.status(200).type('application/json').send('');
+      return true;
+    case 'TEST_large_sse_invalid_mcp_shape':
+      writeSseMessage(res, JSON.stringify(createInvalidMcpCallResultResponse(id, toolName, {
+        diagnosticBlob: createPiDiagnosticBlob(LARGE_DIAGNOSTIC_BLOB_LENGTH),
+      })));
+      return true;
+  }
+
+  return false;
+};
 
 const updateLiveState = (message: string, source: string) => {
   liveState.version += 1;
@@ -210,14 +370,14 @@ function tokenizeRegex(pattern: string): RegexToken[] {
         j++;
       }
       const val = pattern.slice(i, j);
-      let kind = 'Capture group';
-      if (val.startsWith('(?:')) kind = 'Non-capturing group';
-      else if (val.startsWith('(?=')) kind = 'Lookahead (positive)';
-      else if (val.startsWith('(?!')) kind = 'Lookahead (negative)';
-      else if (val.startsWith('(?<=')) kind = 'Lookbehind (positive)';
-      else if (val.startsWith('(?<!')) kind = 'Lookbehind (negative)';
-      else if (val.startsWith('(?<')) kind = 'Named capture group';
-      tokens.push({ type: 'group', value: val.length > 16 ? val.slice(0, 14) + '…)' : val, description: kind });
+      let groupType = 'Capture group';
+      if (val.startsWith('(?:')) groupType = 'Non-capturing group';
+      else if (val.startsWith('(?=')) groupType = 'Lookahead (positive)';
+      else if (val.startsWith('(?!')) groupType = 'Lookahead (negative)';
+      else if (val.startsWith('(?<=')) groupType = 'Lookbehind (positive)';
+      else if (val.startsWith('(?<!')) groupType = 'Lookbehind (negative)';
+      else if (val.startsWith('(?<')) groupType = 'Named capture group';
+      tokens.push({ type: 'group', value: val.length > 16 ? val.slice(0, 14) + '…)' : val, description: groupType });
       i = j;
     } else if (ch === '*' || ch === '+' || ch === '?') {
       const lazy = pattern[i + 1] === '?';
@@ -611,7 +771,7 @@ body{background:#000;overflow:hidden}
 // AST Explorer
 
 interface AstNode {
-  kind: string;
+  syntaxKind: string;
   name?: string;
   text?: string;
   children: AstNode[];
@@ -624,7 +784,7 @@ const LIT_KINDS  = new Set(['StringLiteral','NumericLiteral','BigIntLiteral','Re
 
 function simplifyAst(node: ts.Node, sf: ts.SourceFile, depth: number, budget: { left: number }): AstNode {
   budget.left--;
-  const kind = ts.SyntaxKind[node.kind];
+  const syntaxKind = ts.SyntaxKind[node.kind];
   let name: string | undefined;
   let text: string | undefined;
   if (ts.isIdentifier(node)) { text = node.text.slice(0, 30); }
@@ -638,7 +798,7 @@ function simplifyAst(node: ts.Node, sf: ts.SourceFile, depth: number, budget: { 
       if (budget.left > 0) children.push(simplifyAst(child, sf, depth + 1, budget));
     });
   }
-  return { kind, name, text, children };
+  return { syntaxKind, name, text, children };
 }
 
 // Code Diff
@@ -729,7 +889,7 @@ body{background:var(--mcp-bg,#0d1117);color:var(--mcp-fg,#e6edf3);font-family:-a
     var h='<div class="nr" style="padding-left:'+indent+'">';
     if(hasCh){h+='<span class="tog" data-target="'+id+'" onclick="window.tog(this.dataset.target)">▾</span>';}
     else{h+='<span class="sp"></span>';}
-    h+='<span class="'+cat(node.kind)+'">'+esc(node.kind)+'</span>';
+    h+='<span class="'+cat(node.syntaxKind)+'">'+esc(node.syntaxKind)+'</span>';
     if(node.name){h+=' <span class="nm">'+esc(node.name)+'</span>';}
     else if(node.text){h+=' <span class="tx">'+esc(node.text)+'</span>';}
     h+='</div>';
@@ -1799,6 +1959,120 @@ const getServer = () => {
     }
   );
 
+  for (const diagnosticTool of DIAGNOSTIC_TOOLS) {
+    server.registerTool(
+      diagnosticTool.name,
+      {
+        title: diagnosticTool.title,
+        description: diagnosticTool.description,
+        inputSchema: {},
+      },
+      async (): Promise<CallToolResult> => ({
+        content: [
+          {
+            type: 'text',
+            text: `${diagnosticTool.name} should have been handled by the HTTP diagnostic interceptor.`,
+          },
+        ],
+        isError: true,
+      })
+    );
+  }
+
+  server.registerTool(
+    'TEST_long_running_with_progress',
+    {
+      title: 'TEST - Long Running With Progress',
+      description: 'Runs for a configurable duration and emits MCP progress notifications every 5s. Default duration is 75s.',
+      inputSchema: {
+        durationSeconds: z.number().int().min(1).max(300).default(75).describe('How long the test should run before returning, in seconds'),
+      },
+    },
+    async ({ durationSeconds }, extra): Promise<CallToolResult> => {
+      const progressIntervalMs = 5000;
+      const totalSteps = Math.ceil((durationSeconds * 1000) / progressIntervalMs);
+
+      for (let index = 1; index <= totalSteps; index += 1) {
+        if (extra.signal.aborted) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `TEST_long_running_with_progress cancelled after approximately ${(index - 1) * progressIntervalMs / 1000}s.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (extra._meta?.progressToken !== undefined) {
+          await extra.sendNotification({
+            method: 'notifications/progress',
+            params: {
+              progressToken: extra._meta.progressToken,
+              progress: index,
+              total: totalSteps,
+              message: `Long-running test ${index}/${totalSteps}`,
+            },
+          });
+        }
+
+        const remainingMs = durationSeconds * 1000 - ((index - 1) * progressIntervalMs);
+        await sleep(Math.min(progressIntervalMs, remainingMs));
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `TEST_long_running_with_progress finished after ${durationSeconds}s with regular MCP progress notifications.`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'TEST_long_running_without_progress',
+    {
+      title: 'TEST - Long Running Without Progress',
+      description: 'Runs for a configurable duration without MCP progress notifications. Default duration is 75s.',
+      inputSchema: {
+        durationSeconds: z.number().int().min(1).max(300).default(75).describe('How long the test should run before returning, in seconds'),
+      },
+    },
+    async ({ durationSeconds }, extra): Promise<CallToolResult> => {
+      const progressIntervalMs = 5000;
+      const totalSteps = Math.ceil((durationSeconds * 1000) / progressIntervalMs);
+
+      for (let index = 1; index <= totalSteps; index += 1) {
+        if (extra.signal.aborted) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `TEST_long_running_without_progress cancelled after approximately ${(index - 1) * progressIntervalMs / 1000}s.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const remainingMs = durationSeconds * 1000 - ((index - 1) * progressIntervalMs);
+        await sleep(Math.min(progressIntervalMs, remainingMs));
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `TEST_long_running_without_progress finished after ${durationSeconds}s without MCP progress notifications.`,
+          },
+        ],
+      };
+    }
+  );
+
   const RESORCERER_URI = 'resource://mcp-test-server/resorcerer';
   const dynamicResource = server.registerResource(
     'dynamic-note',
@@ -2410,6 +2684,10 @@ async function startHttpServer() {
     console.log('Received MCP POST request:', req.body);
 
     try {
+      if (handleDiagnosticToolCall(req, res)) {
+        return;
+      }
+
       if (sessionId) {
         const context = sessions.get(sessionId);
 

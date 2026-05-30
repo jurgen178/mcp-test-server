@@ -24,6 +24,15 @@ Small TypeScript MCP server exposed over Streamable HTTP with a few demo tools f
 - `pushLiveUpdate`: updates a live resource and emits resource/logging notifications
 - `startEventBurst`: emits timed server-side events after the tool already returned
 - `toggleDynamicCatalog`: enables or disables demo tool/prompt/resource entries to trigger `list_changed` notifications
+- `TEST_valid_json_invalid_mcp_shape`: returns HTTP 200 with valid JSON but an invalid MCP `tools/call` result shape
+- `TEST_json_response_invalid_json`: returns HTTP 200 with invalid JSON
+- `TEST_sse_data_invalid_json`: returns HTTP 200 as SSE with an invalid JSON `data` field; this test ends with a 60s timeout
+- `TEST_sse_data_invalid_mcp_shape`: returns HTTP 200 as SSE with valid JSON but an invalid MCP result shape
+- `TEST_http_500_error`: returns HTTP 500 as a negative control for normal HTTP failures
+- `TEST_http_200_empty_body`: returns HTTP 200 with an empty response body
+- `TEST_large_sse_invalid_mcp_shape`: returns a large SSE response with valid JSON but an invalid MCP result shape; the diagnostic blob contains exact Pi digits
+- `TEST_long_running_with_progress`: runs for configurable `durationSeconds` with a default of 75s and emits MCP progress notifications every 5s; clients with a 60s inactivity timeout should not time out
+- `TEST_long_running_without_progress`: runs for configurable `durationSeconds` with a default of 75s without MCP progress notifications; clients with a 60s inactivity timeout should time out
 
 ## Included Resources
 
