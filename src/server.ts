@@ -14,6 +14,13 @@ const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
 const EVENT_BURST_INITIAL_DELAY_MS = 1000;
 const MAX_STORED_SSE_EVENTS = 1000;
 
+// Synthetic Last-Event-ID injected for fresh GET connections (no real Last-Event-ID from client).
+// Triggers replayEventsAfter() so notifications stored before the GET stream was established
+// are delivered immediately when the stream opens (fixes the race between connect() and GET SSE).
+const INITIAL_REPLAY_ID = '_start';
+// Must match WebStandardStreamableHTTPServerTransport._standaloneSseStreamId
+const STANDALONE_SSE_STREAM_ID = '_GET_stream';
+
 class InMemoryEventStore implements EventStore {
   private readonly events = new Map<EventId, { streamId: StreamId; message: JSONRPCMessage; sequence: number }>();
   private sequence = 0;
@@ -32,10 +39,25 @@ class InMemoryEventStore implements EventStore {
   }
 
   async getStreamIdForEventId(eventId: EventId): Promise<StreamId | undefined> {
+    if (eventId === INITIAL_REPLAY_ID) {
+      return STANDALONE_SSE_STREAM_ID;
+    }
     return this.events.get(eventId)?.streamId;
   }
 
   async replayEventsAfter(lastEventId: EventId, { send }: { send: (eventId: EventId, message: JSONRPCMessage) => Promise<void> }): Promise<StreamId> {
+    // Fresh GET stream connect: replay all standalone notifications stored while the
+    // GET stream wasn't yet established (race between connect() and GET SSE setup).
+    if (lastEventId === INITIAL_REPLAY_ID) {
+      const pendingEvents = [...this.events.entries()]
+        .filter(([, event]) => event.streamId === STANDALONE_SSE_STREAM_ID)
+        .sort((a, b) => a[1].sequence - b[1].sequence);
+      for (const [eventId, event] of pendingEvents) {
+        await send(eventId, event.message);
+      }
+      return STANDALONE_SSE_STREAM_ID;
+    }
+
     const lastEvent = this.events.get(lastEventId);
 
     if (!lastEvent) {
@@ -43,7 +65,16 @@ class InMemoryEventStore implements EventStore {
     }
 
     const replayEvents = [...this.events.entries()]
-      .filter(([, event]) => event.streamId === lastEvent.streamId && event.sequence > lastEvent.sequence)
+      .filter(([, event]) => {
+        // Always include events from the same stream as the last-event-id.
+        const isSameStream = event.streamId === lastEvent.streamId;
+        // When reconnecting from a POST-stream priming event, also include standalone
+        // GET-stream notifications (cross-stream replay fix).
+        const isStandaloneFromOtherStream =
+          lastEvent.streamId !== STANDALONE_SSE_STREAM_ID &&
+          event.streamId === STANDALONE_SSE_STREAM_ID;
+        return (isSameStream || isStandaloneFromOtherStream) && event.sequence > lastEvent.sequence;
+      })
       .sort((left, right) => left[1].sequence - right[1].sequence);
 
     for (const [eventId, event] of replayEvents) {
@@ -2849,8 +2880,24 @@ async function startHttpServer() {
       return;
     }
 
+    // Clean up any stale standalone SSE stream entry from a previously disconnected client.
+    // The SDK's replayEvents path has a no-op cancel handler, so the _streamMapping entry is
+    // not removed on client disconnect. Without this, the next reconnect would get a 409.
+    context.transport.closeStandaloneSSEStream();
+
+    // For fresh GET connections (no Last-Event-ID from the client), inject a synthetic event ID
+    // so the SDK routes through replayEventsAfter(). That method then replays any standalone
+    // notifications that arrived before the GET stream was established (race-condition fix).
+    if (!req.headers['last-event-id']) {
+      req.rawHeaders.push('last-event-id', INITIAL_REPLAY_ID);
+    }
+
     console.log(`Establishing GET SSE stream for session ${sessionId}`);
     await context.transport.handleRequest(req, res);
+
+    // Post-close cleanup: remove any stale _streamMapping entry left by the no-op cancel
+    // handler in the SDK's replayEvents path, so the client can reconnect without a 409.
+    context.transport.closeStandaloneSSEStream();
   });
 
   app.delete('/mcp', async (req: Request, res: Response) => {
