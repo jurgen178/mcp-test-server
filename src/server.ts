@@ -20,8 +20,6 @@ class InMemoryEventStore implements EventStore {
 
   async storeEvent(streamId: StreamId, message: JSONRPCMessage): Promise<EventId> {
     const eventId = `${Date.now()}-${++this.sequence}`;
-    // [DIAG-A] Log every stored notification method so we can see if tool-list-changed reaches here
-    console.log(`[DIAG-A] storeEvent: streamId=${streamId} method=${(message as { method?: string }).method ?? 'n/a'}`);
     this.events.set(eventId, { streamId, message, sequence: this.sequence });
 
     while (this.events.size > MAX_STORED_SSE_EVENTS) {
@@ -2010,15 +2008,7 @@ const getServer = () => {
       }
 
       if (typeof tool === 'boolean') {
-        // [DIAG-B] Explicit await + catch to detect silent errors from sendToolListChanged
-        console.log(`[DIAG-B] calling setEnabledState for tool, value=${tool}`);
-        try {
-          changes.push(`tool=${setEnabledState(context.dynamicTool, tool)}`);
-          console.log(`[DIAG-B] setEnabledState done, isConnected=${context.server.isConnected()}`);
-        } catch (err) {
-          console.error(`[DIAG-B] ERROR in tool enable/notify:`, err);
-          throw err;
-        }
+        changes.push(`tool=${setEnabledState(context.dynamicTool, tool)}`);
       }
 
       return {
@@ -2857,6 +2847,22 @@ async function startHttpServer() {
     if (!context) {
       res.status(404).send(`Session ${sessionId} not found.`);
       return;
+    }
+
+    // If this is a fresh GET stream (no Last-Event-ID), prime it with a logged event
+    // so the client has a resumption token. Without this, any disconnect before the first
+    // real notification means the client reconnects with no Last-Event-ID and replay is skipped.
+    const lastEventId = req.headers['last-event-id'];
+    if (!lastEventId) {
+      setImmediate(() => {
+        if (context.server.isConnected()) {
+          context.server.sendLoggingMessage({
+            level: 'debug',
+            logger: 'mcp-test-server',
+            data: { event: 'stream-ready' },
+          }).catch(() => {});
+        }
+      });
     }
 
     await context.transport.handleRequest(req, res);
