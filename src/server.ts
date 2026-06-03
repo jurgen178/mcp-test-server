@@ -11,8 +11,7 @@ import { z } from 'zod';
 const MCP_PORT = Number(process.env.PORT) || 3000;
 const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
 const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
-const EVENT_BURST_INITIAL_DELAY_MS = 1500;
-const POST_RESPONSE_SETTLE_DELAY_MS = 100;
+const EVENT_BURST_INITIAL_DELAY_MS = 1000;
 const MAX_STORED_SSE_EVENTS = 1000;
 
 class InMemoryEventStore implements EventStore {
@@ -1998,41 +1997,18 @@ const getServer = () => {
         };
       }
 
-      const sessionId = extra.sessionId;
       const changes: string[] = [];
 
       if (typeof resource === 'boolean') {
-        changes.push(`resource=${resource ? 'enabled' : 'disabled'}`);
+        changes.push(`resource=${setEnabledState(context.dynamicResource, resource)}`);
       }
 
       if (typeof prompt === 'boolean') {
-        changes.push(`prompt=${prompt ? 'enabled' : 'disabled'}`);
+        changes.push(`prompt=${setEnabledState(context.dynamicPrompt, prompt)}`);
       }
 
       if (typeof tool === 'boolean') {
-        changes.push(`tool=${tool ? 'enabled' : 'disabled'}`);
-      }
-
-      if (changes.length > 0) {
-        setTimeout(() => {
-          const latestContext = sessions.get(sessionId);
-
-          if (!latestContext) {
-            return;
-          }
-
-          if (typeof resource === 'boolean') {
-            setEnabledState(latestContext.dynamicResource, resource);
-          }
-
-          if (typeof prompt === 'boolean') {
-            setEnabledState(latestContext.dynamicPrompt, prompt);
-          }
-
-          if (typeof tool === 'boolean') {
-            setEnabledState(latestContext.dynamicTool, tool);
-          }
-        }, POST_RESPONSE_SETTLE_DELAY_MS);
+        changes.push(`tool=${setEnabledState(context.dynamicTool, tool)}`);
       }
 
       return {
@@ -2614,6 +2590,118 @@ const getServer = () => {
   );
 
   dynamicTool.disable();
+
+  const diagnosticNotificationTargetTool = server.registerTool(
+    'TEST_notification_target',
+    {
+      title: 'TEST - Notification Target',
+      description: 'Hidden target toggled by notification diagnostics to force tools/list_changed notifications',
+      inputSchema: {},
+    },
+    async (): Promise<CallToolResult> => ({
+      content: [
+        {
+          type: 'text',
+          text: 'This diagnostic target is only used to trigger tools/list_changed notifications.',
+        },
+      ],
+    })
+  );
+
+  diagnosticNotificationTargetTool.disable();
+
+  server.registerTool(
+    'TEST_in_band_tool_list_changed',
+    {
+      title: 'TEST - In-band Tool List Changed',
+      description: 'Toggles a diagnostic tool during this tools/call handler so the SDK emits a request-related tools/list_changed notification',
+      inputSchema: {
+        enabled: z.boolean().optional().describe('Explicit target state. Omit to toggle the diagnostic target tool.'),
+      },
+    },
+    async ({ enabled }, extra): Promise<CallToolResult> => {
+      const before = diagnosticNotificationTargetTool.enabled;
+      const nextEnabled = enabled ?? !before;
+      const state = setEnabledState(diagnosticNotificationTargetTool, nextEnabled);
+
+      console.log('[diagnostic] TEST_in_band_tool_list_changed', {
+        sessionId: extra.sessionId,
+        before,
+        after: diagnosticNotificationTargetTool.enabled,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'In-band tools/list_changed diagnostic executed.',
+              `Target tool was ${before ? 'enabled' : 'disabled'} and is now ${state}.`,
+              'Expected stream: the current tools/call POST SSE response, because this notification is related to the request.',
+            ].join('\n'),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'TEST_out_of_band_tool_list_changed',
+    {
+      title: 'TEST - Out-of-band Tool List Changed',
+      description: 'Schedules a diagnostic tool toggle after this tools/call result so the SDK emits tools/list_changed on the standalone GET SSE stream',
+      inputSchema: {
+        enabled: z.boolean().optional().describe('Explicit target state. Omit to toggle the diagnostic target tool.'),
+        delayMs: z.number().int().min(0).max(5000).default(250).describe('Delay before toggling the diagnostic target tool'),
+      },
+    },
+    async ({ enabled, delayMs }, extra): Promise<CallToolResult> => {
+      const scheduledAt = Date.now();
+      const sessionId = extra.sessionId;
+      const before = diagnosticNotificationTargetTool.enabled;
+      const nextEnabled = enabled ?? !before;
+
+      setTimeout(() => {
+        const previous = diagnosticNotificationTargetTool.enabled;
+        const state = setEnabledState(diagnosticNotificationTargetTool, nextEnabled);
+
+        console.log('[diagnostic] TEST_out_of_band_tool_list_changed', {
+          sessionId,
+          previous,
+          after: diagnosticNotificationTargetTool.enabled,
+          delayMs,
+        });
+
+        void server.sendLoggingMessage({
+          level: 'info',
+          logger: 'mcp-test-server',
+          data: {
+            event: 'TEST_out_of_band_tool_list_changed',
+            sessionId,
+            scheduledAt,
+            emittedAt: Date.now(),
+            previous: previous ? 'enabled' : 'disabled',
+            state,
+          },
+        }, sessionId).catch(error => {
+          console.error('Failed to send out-of-band diagnostic logging notification:', error);
+        });
+      }, delayMs);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'Out-of-band tools/list_changed diagnostic scheduled.',
+              `Target tool is currently ${before ? 'enabled' : 'disabled'} and will become ${nextEnabled ? 'enabled' : 'disabled'} after ${delayMs}ms.`,
+              'Expected stream: standalone GET SSE, because the SDK notification is emitted after this tools/call has returned.',
+            ].join('\n'),
+          },
+        ],
+      };
+    }
+  );
 
   // Register QR Code Generator (MCP App)
   const QR_UI = 'ui://mcp-test-server/qr-code';
