@@ -2614,7 +2614,7 @@ const getServer = () => {
     'TEST_in_band_tool_list_changed',
     {
       title: 'TEST - In-band Tool List Changed',
-      description: 'Toggles a diagnostic tool during this tools/call handler so the SDK emits a request-related tools/list_changed notification',
+      description: 'Toggles a diagnostic tool during this tools/call handler so the SDK emits tools/list_changed from the McpServer catalog API',
       inputSchema: {
         enabled: z.boolean().optional().describe('Explicit target state. Omit to toggle the diagnostic target tool.'),
       },
@@ -2637,7 +2637,75 @@ const getServer = () => {
             text: [
               'In-band tools/list_changed diagnostic executed.',
               `Target tool was ${before ? 'enabled' : 'disabled'} and is now ${state}.`,
-              'Expected stream: the current tools/call POST SSE response, because this notification is related to the request.',
+              'Expected stream: standalone GET SSE. McpServer catalog notifications do not use extra.sendNotification relatedRequestId.',
+            ].join('\n'),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'TEST_explicit_tool_list_changed',
+    {
+      title: 'TEST - Explicit Tool List Changed',
+      description: 'Sends notifications/tools/list_changed directly through the low-level SDK server API without changing the catalog',
+      inputSchema: {},
+    },
+    async (_, extra): Promise<CallToolResult> => {
+      console.log('[diagnostic] TEST_explicit_tool_list_changed', {
+        sessionId: extra.sessionId,
+      });
+
+      await server.server.sendToolListChanged();
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'Explicit tools/list_changed notification sent and awaited.',
+              'No catalog state changed. This isolates parameterless list_changed delivery from tool-list refresh behavior.',
+            ].join('\n'),
+          },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    'TEST_logging_then_tool_list_changed',
+    {
+      title: 'TEST - Logging Then Tool List Changed',
+      description: 'Sends a logging notification first, then an awaited tools/list_changed notification to test whether the first standalone SSE event is the one being dropped',
+      inputSchema: {},
+    },
+    async (_, extra): Promise<CallToolResult> => {
+      console.log('[diagnostic] TEST_logging_then_tool_list_changed', {
+        sessionId: extra.sessionId,
+      });
+
+      await server.sendLoggingMessage({
+        level: 'info',
+        logger: 'mcp-test-server',
+        data: {
+          event: 'TEST_logging_then_tool_list_changed',
+          sessionId: extra.sessionId,
+          emittedAt: Date.now(),
+          order: 1,
+        },
+      }, extra.sessionId);
+
+      await server.server.sendToolListChanged();
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              'Logging notification sent first, then explicit tools/list_changed sent and awaited.',
+              'If logging appears but tools/list_changed does not, parameterless list_changed handling is suspect.',
+              'If tools/list_changed appears only here, the first standalone SSE event is suspect.',
             ].join('\n'),
           },
         ],
