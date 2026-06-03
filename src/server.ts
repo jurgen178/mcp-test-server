@@ -2849,35 +2849,7 @@ async function startHttpServer() {
       return;
     }
 
-    const lastEventId = req.headers['last-event-id'];
-
-    // Always close any stale GET stream before setting up a new one. Covers two scenarios:
-    // 1. Reconnect (last-event-id present): prevents 409 Conflict in SDK's replayEvents() conflict
-    //    check, which sees '_GET_stream' still in _streamMapping and refuses to replay.
-    // 2. Fresh connect (no last-event-id): clears a stale dead-controller entry left by the SDK's
-    //    replayed stream, whose ReadableStream cancel callback is a no-op (SDK bug). Without this,
-    //    the dead controller stays in _streamMapping and notifications are silently swallowed on the
-    //    new stream — only replayed on the next reconnect, causing the "tool list only updates after
-    //    the next notification" bug.
-    // closeStandaloneSSEStream() is a no-op when no stream is registered, so this is always safe.
-    context.transport.closeStandaloneSSEStream();
-
-    if (!lastEventId) {
-      // Fresh GET stream (no Last-Event-ID). Prime it with a logged event so the client
-      // gets an SSE id: field and stores a resumption token. Without this, any disconnect
-      // before the first real notification means the client reconnects with no Last-Event-ID
-      // and replay is skipped entirely.
-      setImmediate(() => {
-        if (context.server.isConnected()) {
-          context.server.sendLoggingMessage({
-            level: 'debug',
-            logger: 'mcp-test-server',
-            data: { event: 'stream-ready' },
-          }).catch(() => {});
-        }
-      });
-    }
-
+    console.log(`Establishing GET SSE stream for session ${sessionId}`);
     await context.transport.handleRequest(req, res);
   });
 
