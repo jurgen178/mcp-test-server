@@ -11,7 +11,8 @@ import { z } from 'zod';
 const MCP_PORT = Number(process.env.PORT) || 3000;
 const LIVE_RESOURCE_URI = 'resource://mcp-test-server/live-status';
 const DYNAMIC_RESOURCE_URI = 'resource://mcp-test-server/dynamic-note';
-const EVENT_BURST_INITIAL_DELAY_MS = 1000;
+const EVENT_BURST_INITIAL_DELAY_MS = 1500;
+const POST_RESPONSE_SETTLE_DELAY_MS = 100;
 const MAX_STORED_SSE_EVENTS = 1000;
 
 class InMemoryEventStore implements EventStore {
@@ -1997,18 +1998,41 @@ const getServer = () => {
         };
       }
 
+      const sessionId = extra.sessionId;
       const changes: string[] = [];
 
       if (typeof resource === 'boolean') {
-        changes.push(`resource=${setEnabledState(context.dynamicResource, resource)}`);
+        changes.push(`resource=${resource ? 'enabled' : 'disabled'}`);
       }
 
       if (typeof prompt === 'boolean') {
-        changes.push(`prompt=${setEnabledState(context.dynamicPrompt, prompt)}`);
+        changes.push(`prompt=${prompt ? 'enabled' : 'disabled'}`);
       }
 
       if (typeof tool === 'boolean') {
-        changes.push(`tool=${setEnabledState(context.dynamicTool, tool)}`);
+        changes.push(`tool=${tool ? 'enabled' : 'disabled'}`);
+      }
+
+      if (changes.length > 0) {
+        setTimeout(() => {
+          const latestContext = sessions.get(sessionId);
+
+          if (!latestContext) {
+            return;
+          }
+
+          if (typeof resource === 'boolean') {
+            setEnabledState(latestContext.dynamicResource, resource);
+          }
+
+          if (typeof prompt === 'boolean') {
+            setEnabledState(latestContext.dynamicPrompt, prompt);
+          }
+
+          if (typeof tool === 'boolean') {
+            setEnabledState(latestContext.dynamicTool, tool);
+          }
+        }, POST_RESPONSE_SETTLE_DELAY_MS);
       }
 
       return {
