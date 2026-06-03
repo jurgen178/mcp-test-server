@@ -2851,16 +2851,18 @@ async function startHttpServer() {
 
     const lastEventId = req.headers['last-event-id'];
 
-    if (lastEventId) {
-      // The client is reconnecting with a Last-Event-ID to resume.
-      // If the old GET stream is still registered in _streamMapping (e.g. because its ReadableStream
-      // cancel callback hasn't fired yet after a network timeout), the SDK's replayEvents() will
-      // see a conflict on '_GET_stream' and return 409 — causing the client to reconnect fresh with
-      // no resumption token, silently losing any queued notifications.
-      // Force-close the stale stream mapping before the SDK's handleRequest runs so that
-      // replayEvents() can proceed without hitting the 409 conflict check.
-      context.transport.closeStandaloneSSEStream();
-    } else {
+    // Always close any stale GET stream before setting up a new one. Covers two scenarios:
+    // 1. Reconnect (last-event-id present): prevents 409 Conflict in SDK's replayEvents() conflict
+    //    check, which sees '_GET_stream' still in _streamMapping and refuses to replay.
+    // 2. Fresh connect (no last-event-id): clears a stale dead-controller entry left by the SDK's
+    //    replayed stream, whose ReadableStream cancel callback is a no-op (SDK bug). Without this,
+    //    the dead controller stays in _streamMapping and notifications are silently swallowed on the
+    //    new stream — only replayed on the next reconnect, causing the "tool list only updates after
+    //    the next notification" bug.
+    // closeStandaloneSSEStream() is a no-op when no stream is registered, so this is always safe.
+    context.transport.closeStandaloneSSEStream();
+
+    if (!lastEventId) {
       // Fresh GET stream (no Last-Event-ID). Prime it with a logged event so the client
       // gets an SSE id: field and stores a resumption token. Without this, any disconnect
       // before the first real notification means the client reconnects with no Last-Event-ID
