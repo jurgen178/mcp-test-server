@@ -2849,11 +2849,22 @@ async function startHttpServer() {
       return;
     }
 
-    // If this is a fresh GET stream (no Last-Event-ID), prime it with a logged event
-    // so the client has a resumption token. Without this, any disconnect before the first
-    // real notification means the client reconnects with no Last-Event-ID and replay is skipped.
     const lastEventId = req.headers['last-event-id'];
-    if (!lastEventId) {
+
+    if (lastEventId) {
+      // The client is reconnecting with a Last-Event-ID to resume.
+      // If the old GET stream is still registered in _streamMapping (e.g. because its ReadableStream
+      // cancel callback hasn't fired yet after a network timeout), the SDK's replayEvents() will
+      // see a conflict on '_GET_stream' and return 409 — causing the client to reconnect fresh with
+      // no resumption token, silently losing any queued notifications.
+      // Force-close the stale stream mapping before the SDK's handleRequest runs so that
+      // replayEvents() can proceed without hitting the 409 conflict check.
+      context.transport.closeStandaloneSSEStream();
+    } else {
+      // Fresh GET stream (no Last-Event-ID). Prime it with a logged event so the client
+      // gets an SSE id: field and stores a resumption token. Without this, any disconnect
+      // before the first real notification means the client reconnects with no Last-Event-ID
+      // and replay is skipped entirely.
       setImmediate(() => {
         if (context.server.isConnected()) {
           context.server.sendLoggingMessage({
